@@ -102,9 +102,19 @@ def test_swarm_preset_count_matches_bundled_yaml_files() -> None:
 
 
 def test_market_data_source_count_matches_loader_registry() -> None:
+    # PRIVATE: 与 test_readme_counts.py 同一处理——``SKILL.md`` 是上游的分发
+    # 清单，只该数上游自己的源。``_PRIVATE_SOURCES`` 用 import 取而非沿用本
+    # 文件的 AST 读法，因为 ``frozenset({...})`` 是调用而不是字面量，
+    # ``ast.literal_eval`` 读不了。断言强度不变：少一个上游源仍然立刻变红。
+    import sys
+
+    if str(AGENT_ROOT) not in sys.path:
+        sys.path.insert(0, str(AGENT_ROOT))
+    from backtest.loaders.registry import _PRIVATE_SOURCES
+
     sources = _literal_assignment(LOADER_REGISTRY_PATH, "VALID_SOURCES")
     assert isinstance(sources, set)
-    expected = len(sources - {"auto"})
+    expected = len(sources - {"auto"} - _PRIVATE_SOURCES)
     _assert_all_counts(r"\b(\d+)\s+market-data sources\b", expected)
     _assert_all_counts(r"across\s+(\d+)\s+sources\b", expected)
 

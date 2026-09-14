@@ -576,13 +576,22 @@ def _readme_loader_names(text: str) -> list[str]:
     return [n for n in names if n]
 
 
+# PRIVATE: 这三个检查（树行 / 散文计数 / 数据源表）比较的是
+# ``registered - _PRIVATE_SOURCES``，即只校验上游自己的源。本私有分支多出的
+# tdxtap 不属于上游产品，照改六份 README 会把冲突面抬到 6 文件 × 3 处，而
+# 上游约每 2.5 周就要动一次 loaders 树行。减集不放宽任何断言：对 27 个上游
+# 源的漂移检测强度与原样一模一样，少一个上游源仍然立刻变红。
 @pytest.mark.parametrize("readme", READMES)
 def test_readme_loader_tree_line_matches_the_registry(readme: str) -> None:
     """Every README's loaders line must name exactly the registered sources."""
-    from backtest.loaders.registry import LOADER_REGISTRY, _ensure_registered
+    from backtest.loaders.registry import (
+        LOADER_REGISTRY,
+        _PRIVATE_SOURCES,
+        _ensure_registered,
+    )
 
     _ensure_registered()
-    registered = set(LOADER_REGISTRY)
+    registered = set(LOADER_REGISTRY) - _PRIVATE_SOURCES
 
     text = _read(readme)
     match = _LOADER_TREE_RE.search(text)
@@ -635,14 +644,19 @@ def _source_intro_line(text: str) -> str:
 @pytest.mark.parametrize("readme", READMES)
 def test_data_sources_prose_states_the_real_source_count(readme: str) -> None:
     """The headline source count must be the registry's, in every language."""
-    from backtest.loaders.registry import LOADER_REGISTRY, _ensure_registered
+    from backtest.loaders.registry import (
+        LOADER_REGISTRY,
+        _PRIVATE_SOURCES,
+        _ensure_registered,
+    )
 
     _ensure_registered()
+    upstream = set(LOADER_REGISTRY) - _PRIVATE_SOURCES
     line = _source_intro_line(_read(readme))
     bold = " ".join(re.findall(r"\*\*(.+?)\*\*", line))
-    assert str(len(LOADER_REGISTRY)) in _numbers(bold), (
+    assert str(len(upstream)) in _numbers(bold), (
         f"{readme}: the Data Sources intro states "
-        f"{sorted(_numbers(bold))} where the registry has {len(LOADER_REGISTRY)}"
+        f"{sorted(_numbers(bold))} where the registry has {len(upstream)}"
     )
 
 
@@ -654,12 +668,18 @@ def test_every_registered_source_appears_in_the_data_sources_table(readme: str) 
     is shipped to nobody. Checked against the registry rather than against
     the other READMEs, so all six being uniformly wrong still fails.
     """
-    from backtest.loaders.registry import LOADER_REGISTRY, _ensure_registered
+    from backtest.loaders.registry import (
+        LOADER_REGISTRY,
+        _PRIVATE_SOURCES,
+        _ensure_registered,
+    )
 
     _ensure_registered()
     rows = [l for l in _read(readme).splitlines() if l.startswith("| `")]
     table = " ".join(rows)
-    missing = sorted(n for n in LOADER_REGISTRY if f"`{n}`" not in table)
+    missing = sorted(
+        n for n in set(LOADER_REGISTRY) - _PRIVATE_SOURCES if f"`{n}`" not in table
+    )
     assert not missing, f"{readme}: sources missing from the Data Sources table: {missing}"
 
 

@@ -38,9 +38,7 @@ _TRADING_DAYS = {
     "fmp": 252, "stooq": 252, "longbridge": 252,
     # resampling sources (local files / paid data — interval depends on source
     # data granularity; model as US equity session as a conservative default)
-    # PRIVATE: tdxtap 也并入这一档——同样是本地文件源，日线为唯一实际粒度，
-    # 与 local 走同一套保守近似。
-    "local": 252, "qveris": 252, "tdxtap": 252,
+    "local": 252, "qveris": 252,
     # Indian equity
     "india_broker": 252,
     # Korean equity (KRX)
@@ -59,7 +57,7 @@ _BARS_PER_DAY = {
     #  --- US/international equity (6.5h session) ---
     "1m":  {"yfinance": 390, "yahoo": 390, "finnhub": 390, "alphavantage": 390,
             "tiingo": 390, "fmp": 390, "stooq": 390, "longbridge": 390,
-            "local": 390, "qveris": 390, "tdxtap": 390,
+            "local": 390, "qveris": 390,
             # A-share equity (4.0h session)
             "tushare": 240, "akshare": 240, "baostock": 240, "tencent": 240,
             "eastmoney": 240, "sina": 240, "mootdx": 240, "futu": 240,
@@ -75,7 +73,7 @@ _BARS_PER_DAY = {
             },
     "5m":  {"yfinance": 78,  "yahoo": 78,  "finnhub": 78,  "alphavantage": 78,
             "tiingo": 78,  "fmp": 78,  "stooq": 78,  "longbridge": 78,
-            "local": 78, "qveris": 78, "tdxtap": 78,
+            "local": 78, "qveris": 78,
             "tushare": 48,  "akshare": 48,  "baostock": 48,  "tencent": 48,
             "eastmoney": 48,  "sina": 48,  "mootdx": 48,  "futu": 48,
             "okx": 288,  "ccxt": 288,  "binance": 288,
@@ -86,7 +84,7 @@ _BARS_PER_DAY = {
             },
     "15m": {"yfinance": 26,  "yahoo": 26,  "finnhub": 26,  "alphavantage": 26,
             "tiingo": 26,  "fmp": 26,  "stooq": 26,  "longbridge": 26,
-            "local": 26, "qveris": 26, "tdxtap": 26,
+            "local": 26, "qveris": 26,
             "tushare": 16,  "akshare": 16,  "baostock": 16,  "tencent": 16,
             "eastmoney": 16,  "sina": 16,  "mootdx": 16,  "futu": 16,
             "okx": 96,   "ccxt": 96,   "binance": 96,
@@ -97,7 +95,7 @@ _BARS_PER_DAY = {
             },
     "30m": {"yfinance": 13,  "yahoo": 13,  "finnhub": 13,  "alphavantage": 13,
             "tiingo": 13,  "fmp": 13,  "stooq": 13,  "longbridge": 13,
-            "local": 13, "qveris": 13, "tdxtap": 13,
+            "local": 13, "qveris": 13,
             "tushare": 8,   "akshare": 8,   "baostock": 8,   "tencent": 8,
             "eastmoney": 8,   "sina": 8,   "mootdx": 8,   "futu": 8,
             "okx": 48,   "ccxt": 48,   "binance": 48,
@@ -108,7 +106,7 @@ _BARS_PER_DAY = {
             },
     "1H":  {"yfinance": 7,   "yahoo": 7,   "finnhub": 7,   "alphavantage": 7,
             "tiingo": 7,   "fmp": 7,   "stooq": 7,   "longbridge": 7,
-            "local": 7, "qveris": 7, "tdxtap": 7,
+            "local": 7, "qveris": 7,
             "tushare": 4,   "akshare": 4,   "baostock": 4,   "tencent": 4,
             "eastmoney": 4,   "sina": 4,   "mootdx": 4,   "futu": 4,
             "okx": 24,   "ccxt": 24,   "binance": 24,
@@ -119,7 +117,7 @@ _BARS_PER_DAY = {
             },
     "4H":  {"yfinance": 2,   "yahoo": 2,   "finnhub": 2,   "alphavantage": 2,
             "tiingo": 2,   "fmp": 2,   "stooq": 2,   "longbridge": 2,
-            "local": 2, "qveris": 2, "tdxtap": 2,
+            "local": 2, "qveris": 2,
             "tushare": 1,   "akshare": 1,   "baostock": 1,   "tencent": 1,
             "eastmoney": 1,   "sina": 1,   "mootdx": 1,   "futu": 1,
             "okx": 6,    "ccxt": 6,    "binance": 6,
@@ -130,7 +128,7 @@ _BARS_PER_DAY = {
             },
     "1D":  {"yfinance": 1,   "yahoo": 1,   "finnhub": 1,   "alphavantage": 1,
             "tiingo": 1,   "fmp": 1,   "stooq": 1,   "longbridge": 1,
-            "local": 1, "qveris": 1, "tdxtap": 1,
+            "local": 1, "qveris": 1,
             "tushare": 1,   "akshare": 1,   "baostock": 1,   "tencent": 1,
             "eastmoney": 1,   "sina": 1,   "mootdx": 1,   "futu": 1,
             "okx": 1,    "ccxt": 1,    "binance": 1,
@@ -140,6 +138,13 @@ _BARS_PER_DAY = {
             "pykrx": 1,
             },
 }
+
+# PRIVATE: tdxtap 比照 local —— 同为本地文件源，日线是唯一实际粒度。
+# 写成派生而非在字面量里插 7 行：上游加源时改的正是那 7 行，派生块把
+# 冲突点从 7 个降到 1 个，还能自动跟随上游对 local 取值的调整。
+_TRADING_DAYS["tdxtap"] = _TRADING_DAYS["local"]
+for _row in _BARS_PER_DAY.values():
+    _row["tdxtap"] = _row["local"]
 
 # Runner/loaders also emit these aliases; map them onto the table keys above.
 _SOURCE_ALIASES = {"yahoo": "yfinance", "binance": "ccxt"}

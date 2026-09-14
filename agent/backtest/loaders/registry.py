@@ -64,6 +64,15 @@ VALID_SOURCES: set[str] = {
     "auto",
 }
 
+# PRIVATE: 只存在于本私有分支、不属于上游产品的源。
+# 用途是让上游那些「每个注册源都必须出现在文档里」的守卫测试只校验上游
+# 自己的源（`registered - _PRIVATE_SOURCES`）。备选是照改六份 README 与
+# SKILL.md，但上游 120 天内有 7 次 commit 改的正是 loaders 树行那几处，
+# 约每 2.5 周就要在 6 份文件里手工解一次冲突；而减集对 27 个上游源的漂移
+# 检测强度完全不变。上游 README 停在 27 反而更诚实——tdxtap 本就不是
+# 上游产品的一部分。
+_PRIVATE_SOURCES: frozenset[str] = frozenset({"tdxtap"})
+
 
 def register(cls: Type[Any]) -> Type[Any]:
     """Class decorator: register a loader into the global registry.
@@ -122,7 +131,7 @@ def _ensure_registered() -> None:
             "backtest.loaders.mt5_loader",
             "backtest.loaders.tickerall_loader",
             "backtest.loaders.local_loader",
-            "backtest.loaders.tdxtap_loader",  # PRIVATE
+            "backtest.loaders.tdxtap_loader",  # PRIVATE: tdxtap
         ]
         import importlib
 
@@ -151,7 +160,8 @@ def _ensure_registered() -> None:
 # ``BTCIRT`` request into the crypto chain would hand a USDT-quoted series back
 # as if it were Toman — a caliber error of about six orders of magnitude, not a
 # missing-data error. An unreachable Iranian endpoint must be visible.
-# ``tdxtap`` 同理：调用方要的是快照的溯源，缺票必须可见。PRIVATE
+# PRIVATE: ``tdxtap`` 同理——调用方要的是快照的溯源，缺票必须可见。取不到
+# 数据即报错退出、绝不静默用网络源补齐，正是这条私有分支存在的首要理由。
 _NO_NETWORK_FALLBACK_SOURCES: frozenset[str] = frozenset(
     {"local", "qveris", "tickerall", "fmp", "nobitex", "wallex", "tdxtap"}  # PRIVATE: tdxtap
 )  # QVERIS-INTEGRATION
@@ -536,6 +546,10 @@ def get_loader_cls_with_fallback(source: str) -> Type[Any]:
             "wallex": "Wallex's public endpoint was unreachable. It quotes in "
             "Toman (TMN) and has no substitute — check network access "
             "to api.wallex.ir.",
+            # PRIVATE: tdxtap
+            "tdxtap": "The tdxtap snapshot under "
+            "~/.vibe-trading/data-bridge/tdxtap/ is missing or empty — run "
+            "`tdxtap pull <codes> --export` to write it.",
         }.get(source, "")
         raise NoAvailableSourceError(
             f"Data source '{source}' is unavailable and does not fall back to a "
