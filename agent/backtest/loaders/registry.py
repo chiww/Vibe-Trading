@@ -60,6 +60,7 @@ VALID_SOURCES: set[str] = {
     "mt5",
     "tickerall",
     "local",
+    "tdxtap",  # PRIVATE: tdxtap 快照
     "auto",
 }
 
@@ -121,6 +122,7 @@ def _ensure_registered() -> None:
             "backtest.loaders.mt5_loader",
             "backtest.loaders.tickerall_loader",
             "backtest.loaders.local_loader",
+            "backtest.loaders.tdxtap_loader",  # PRIVATE
         ]
         import importlib
 
@@ -149,8 +151,9 @@ def _ensure_registered() -> None:
 # ``BTCIRT`` request into the crypto chain would hand a USDT-quoted series back
 # as if it were Toman — a caliber error of about six orders of magnitude, not a
 # missing-data error. An unreachable Iranian endpoint must be visible.
+# ``tdxtap`` 同理：调用方要的是快照的溯源，缺票必须可见。PRIVATE
 _NO_NETWORK_FALLBACK_SOURCES: frozenset[str] = frozenset(
-    {"local", "qveris", "tickerall", "fmp", "nobitex", "wallex"}
+    {"local", "qveris", "tickerall", "fmp", "nobitex", "wallex", "tdxtap"}  # PRIVATE: tdxtap
 )  # QVERIS-INTEGRATION
 
 
@@ -263,6 +266,11 @@ PRICE_CALIBER_BY_SOURCE: dict[str, str] = {
 PRICE_CALIBER_BY_SOURCE_MARKET: dict[tuple[str, str], str] = {
     # Tushare publishes no HK adjustment-factor series, so its HK path is raw.
     ("tushare", "hk_equity"): "raw",
+    # PRIVATE: tdxtap：A 股自算前复权（对照腾讯 qfq 偏差 0.0000%）；扩展行情无除权除息
+    # 接口，港美股永远只能是 raw。
+    ("tdxtap", "a_share"): "split_dividend",
+    ("tdxtap", "hk_equity"): "raw",
+    ("tdxtap", "us_equity"): "raw",
 }
 
 #: Markets with no corporate-action adjustment concept. Their sources stamp

@@ -103,3 +103,38 @@ def test_declares_shares_for_every_market(snapshot):
 def test_markets_and_auth(snapshot):
     assert DataLoader.markets == {"a_share", "hk_equity", "us_equity"}
     assert DataLoader.requires_auth is False
+
+
+def test_registered_and_source_is_valid():
+    from backtest.loaders.registry import VALID_SOURCES, LOADER_REGISTRY, _ensure_registered
+    _ensure_registered()
+    assert "tdxtap" in VALID_SOURCES
+    assert LOADER_REGISTRY["tdxtap"].name == "tdxtap"
+
+
+def test_never_degrades_to_a_network_source():
+    from backtest.loaders.registry import _NO_NETWORK_FALLBACK_SOURCES
+    assert "tdxtap" in _NO_NETWORK_FALLBACK_SOURCES
+
+
+def test_not_in_any_fallback_chain():
+    """显式点名才用。进链会制造「以为吃到快照其实没吃到」的中间态，
+    也会让用户已设的 MARKET_DATA_ORDER_* 变成非排列而被打回默认序。"""
+    from backtest.loaders.registry import FALLBACK_CHAINS
+    for market, chain in FALLBACK_CHAINS.items():
+        assert "tdxtap" not in chain, market
+
+
+def test_price_caliber_is_declared_per_market():
+    """local 的口径恒为 unknown，这正是独立 source 买到的东西。"""
+    from backtest.loaders.registry import price_caliber
+    assert price_caliber("tdxtap", "a_share") == "split_dividend"
+    assert price_caliber("tdxtap", "hk_equity") == "raw"
+    assert price_caliber("tdxtap", "us_equity") == "raw"
+
+
+def test_a_share_routes_to_the_china_engine():
+    from backtest.engines.china_a import ChinaAEngine
+    from backtest.runner import _create_market_engine
+    engine = _create_market_engine("tdxtap", {"initial_cash": 100_000}, ["000001.SZ"])
+    assert isinstance(engine, ChinaAEngine)
