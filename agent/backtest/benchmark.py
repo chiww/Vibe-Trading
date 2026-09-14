@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 import pandas as pd
 
+from backtest.loaders.registry import is_no_network_fallback_source
 from backtest.loaders.yfinance_loader import DataLoader as YfinanceLoader
 from backtest.metrics import bar_returns, buy_and_hold_return
 
@@ -94,7 +95,12 @@ def resolve_benchmark(
     if ticker is None:
         return None
 
-    offline = source == "local"
+    # "Offline" is not a property of ``local`` alone: every source the registry
+    # marks as no-network-fallback was named explicitly *because* the caller
+    # wants that source's provenance, and quietly fetching the benchmark from
+    # Yahoo reintroduces the network on the one number every return is graded
+    # against. Ask the registry rather than hard-coding one source name.
+    offline = is_no_network_fallback_source(source)
     if offline and getattr(loader, "name", None) != source:
         # The runtime fallback chain in fetch_data_map() may have swapped in a
         # network loader while config["source"] still says local — never fetch
@@ -177,7 +183,10 @@ def _infer_market(codes: list[str], source: str) -> str:
     crypto_quotes = ("-USDT", "-USDC", "-USD", "-BTC", "-ETH")
     if source in ("okx", "ccxt", "binance") or "/" in first or first.endswith(crypto_quotes):
         return "crypto"
-    if source in ("tushare", "akshare"):
+    # PRIVATE: tdxtap joins the A-share sources here. Without it a
+    # ``000001.SZ`` basket fell through to the ``us_equity`` default and was
+    # graded against SPY — a benchmark from the wrong continent, silently.
+    if source in ("tushare", "akshare", "tdxtap"):
         if first.isdigit() and len(first) == 6:
             return "a_share"
         if first.startswith(("IF", "IC", "IH", "IM", "T", "TF")):

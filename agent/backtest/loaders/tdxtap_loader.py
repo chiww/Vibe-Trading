@@ -15,12 +15,8 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
-from backtest.loaders.base import (
-    cached_loader_fetch,
-    validate_date_range,
-    validate_ohlc,
-)
-from backtest.loaders.registry import register
+from backtest.loaders.base import validate_date_range, validate_ohlc
+from backtest.loaders.registry import price_caliber, register
 
 logger = logging.getLogger(__name__)
 
@@ -40,13 +36,31 @@ def _entries() -> dict[str, dict]:
     return entries if isinstance(entries, dict) else {}
 
 
-def _by_symbol() -> dict[str, dict]:
-    """``symbol -> 条目``。清单的键是 ``market/symbol``。"""
-    out: dict[str, dict] = {}
+def _by_symbol() -> dict[str, tuple[str, dict]]:
+    """``symbol -> (market, 条目)``。清单的键是 ``market/symbol``。
+
+    market 必须留着：口径核对是按市场比的（A 股前复权，港美股未复权），而
+    只拿 symbol 做键会让同名标的跨市场静默互相覆盖——一只港股被当成同名
+    A 股喂进回测，全程零告警。歧义在这里被丢掉并告警，缺口随后由
+    ``_NO_NETWORK_FALLBACK_SOURCES`` 守卫升级成硬失败。
+    """
+    out: dict[str, tuple[str, dict]] = {}
+    ambiguous: set[str] = set()
     for key, meta in _entries().items():
-        _, _, symbol = key.partition("/")
-        if symbol:
-            out[symbol] = meta
+        market, _, symbol = key.partition("/")
+        if not market or not symbol:
+            continue
+        if symbol in out and out[symbol][0] != market:
+            ambiguous.add(symbol)
+            continue
+        out[symbol] = (market, meta)
+    for symbol in ambiguous:
+        logger.warning(
+            "tdxtap: %s 在快照里跨市场重名（%s 与其它市场），无法判定该用哪一份；跳过",
+            symbol,
+            out[symbol][0],
+        )
+        out.pop(symbol, None)
     return out
 
 
@@ -74,35 +88,66 @@ class DataLoader:
         interval: str = "1D",
         fields: Optional[List[str]] = None,
     ) -> Dict[str, pd.DataFrame]:
-        """按清单取 OHLCV。清单里没有的标的直接跳过——是否报错由调用方决定。"""
+        """按清单取 OHLCV。清单里没有的标的直接跳过——是否报错由调用方决定。
+
+        跳过在本源上等于硬失败：``tdxtap`` 在
+        ``_NO_NETWORK_FALLBACK_SOURCES`` 里，任何缺口都会被 runner 变成
+        ``NoAvailableSourceError``。所以下面每个 ``continue`` 都是「响亮地
+        失败」，不是「悄悄少给一只票」。
+        """
         validate_date_range(start_date, end_date)
         if interval not in ("1D", "1d"):
-            logger.warning(
-                "tdxtap 快照只有日线，interval=%s 无法提供；按日线返回", interval
+            # 快照只有日线。按日线数据做 5 分钟线年化会差 78 倍
+            # （calc_bars_per_year("5m", "tdxtap") = 19656），而且这个错误会
+            # 一路落到 Sharpe 上。tdxtap 不在任何 FALLBACK_CHAINS 里，拒绝
+            # 不会让 auto 链上的探测变脆，所以这里拒绝而不是告警后凑合。
+            logger.error(
+                "tdxtap 快照只有日线，interval=%s 无法提供；拒绝返回日线冒充 %s，"
+                "否则年化换算会按 %s 的粒度做。请把 interval 改成 1D。",
+                interval, interval, interval,
             )
+            return {}
         index = _by_symbol()
         result: Dict[str, pd.DataFrame] = {}
         for code in codes:
-            meta = index.get(code)
-            if meta is None:
+            entry = index.get(code)
+            if entry is None:
                 logger.warning("tdxtap: 快照里没有 %s", code)
                 continue
+            market, meta = entry
+            if not self._caliber_agrees(code, market, meta):
+                continue
             try:
-                frame = cached_loader_fetch(
-                    source=self.name,
-                    symbol=code,
-                    timeframe=interval,
-                    start_date=start_date,
-                    end_date=end_date,
-                    fields=None,
-                    fetch=lambda m=meta: self._read(m, start_date, end_date),
-                )
+                # 不过 cached_loader_fetch：读本地 parquet 本来就比读缓存快，
+                # 而缓存的前提「已结算的历史不再变化」对本源不成立——A 股前复权
+                # 序列每次除权都整段重算。
+                frame = self._read(meta, start_date, end_date)
             except Exception as exc:
                 logger.warning("tdxtap: 读 %s 失败: %s", code, exc)
                 continue
             if frame is not None and not frame.empty:
                 result[code] = frame
         return result
+
+    @staticmethod
+    def _caliber_agrees(code: str, market: str, meta: dict) -> bool:
+        """快照自报的口径是否与 registry 的声明一致。
+
+        registry 里的 ``PRICE_CALIBER_BY_SOURCE_MARKET`` 是一句硬编码断言，
+        而 manifest 每次导出都带着真实的 ``adjustment``。三条设计要求里只有
+        「口径如实声明」没有运行时兜底，这里把它补上：对不上就不要这只票，
+        让它走已验证的硬失败路径，而不是把未复权价当成前复权价喂进去。
+        """
+        declared = price_caliber("tdxtap", market)
+        actual = meta.get("adjustment")
+        if actual == declared:
+            return True
+        logger.warning(
+            "tdxtap: %s（%s）快照口径为 %s，registry 声明的是 %s；两者不一致时"
+            "无法判断价格可比性，跳过该标的",
+            code, market, actual, declared,
+        )
+        return False
 
     @staticmethod
     def _read(meta: dict, start_date: str, end_date: str) -> pd.DataFrame | None:

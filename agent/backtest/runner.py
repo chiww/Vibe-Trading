@@ -909,6 +909,13 @@ def _get_loader(source: str):
     try:
         return get_loader_cls_with_fallback(source)
     except NoAvailableSourceError:
+        # The registry raises for two different reasons, and only one of them
+        # may be papered over. A source that must never silently degrade was
+        # refused on purpose: handing back tushare here would serve network
+        # bars under the requested source's name, which is the exact failure
+        # the refusal exists to prevent. Re-raise so the caller sees it.
+        if is_no_network_fallback_source(source):
+            raise
         # Ultimate fallback for unknown sources
         if "tushare" in LOADER_REGISTRY:
             return LOADER_REGISTRY["tushare"]
@@ -1261,7 +1268,15 @@ def main(run_dir: Path) -> None:
         print(json.dumps({"error": f"SignalEngine interface error: {exc}"}))
         sys.exit(1)
 
-    fetch_result = fetch_data_map(config)
+    try:
+        fetch_result = fetch_data_map(config)
+    except NoAvailableSourceError as exc:
+        # For a source that refuses to degrade to the network, an incomplete
+        # basket is the everyday path, not a corner case — surface it in the
+        # same JSON envelope every other failure in this function uses instead
+        # of a raw traceback.
+        print(json.dumps({"error": f"NoAvailableSourceError: {exc}"}))
+        sys.exit(1)
     data_map = fetch_result.data_map
     codes = fetch_result.codes
     source = fetch_result.source
