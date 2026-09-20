@@ -5,6 +5,240 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **A Robinhood account can be a read-only portfolio source** (#1428). The new
+  `robinhood-live-mcp-readonly` profile uses the same MCP server and OAuth
+  grant as the trading profile. Its connection reads exactly one account,
+  picked from Robinhood's own `get_accounts` list in the connection center or
+  with `vibe-trading connector select-account <id>`. Nothing is preselected,
+  and a source with no account errors before any broker call. Holdings come
+  from `get_portfolio` and `get_equity_positions` and are mapped only from the
+  shapes the reporter posted. A second page of positions, a null list or item,
+  or an unknown field is an error, not a shorter account. Positions show
+  quantity and cost but no price until the quote reply is mapped. An account
+  that also holds options, crypto, futures, event contracts, mutual funds or
+  fixed income fails the source instead of showing an equity-only view.
+
+### Changed
+
+- **The final-answer grounding gate no longer guesses what a number is from the
+  words around it.** Only a number's SHAPE is inferred — a decimal point, a
+  percent sign, a currency mark or a table cell makes it a measurement; dates
+  (including year-less "09-14"), years, security codes, line-leading ordinals
+  and code in a language-tagged fence are structure; a plain integer is checked
+  only as a price of an instrument quoted in the thousands — so a sentence
+  gets the same verdict in every language. A measurement that equals a price
+  or volume this session's tools returned needs nothing more. Any other one is
+  declared in a fenced `figures` block at the end of the answer, one line per
+  figure — `value | role | note | ref` — and checked by role: `observed` must
+  appear in the referenced call or tool (`ref` may name either), filtered to
+  the figure's own symbol, with a currency-marked figure compared only against
+  money-denominated values and a percent only against non-price ones;
+  `derived` needs an evaluable formula whose added or subtracted operands are
+  all observed, matching the figure at the precision and sign it was written
+  with; `proposed` is a price inside its own symbol's observed range or a
+  derivation; `cited` must name its source on the figure's own line, because
+  the block is stripped before anyone reads the answer; `count` covers counts,
+  weights, thresholds and probabilities, while a currency-marked figure, or one
+  inside its instrument's price range that no derivation uses as a factor, is
+  checked as observed when declared `count`. No role other than `observed` may sit in a
+  price column. The block is stripped from the released answer and never
+  streamed; the artifact keeps it. The price-word, level-word,
+  derivation-phrase and metric-subject catalogues are deleted with it
+  (65 compiled regexes → 12, all shape), and `src/agent/grounding.py` is now
+  the `src/agent/grounding/` package.
+- **A rejected answer costs one correction round, not four, and is then
+  released with its failing figures cut rather than refused.** The correction
+  prompt lists every failing figure as written, with its declared role and what
+  the evidence says (the observed range, the nearest observed values, or what
+  its own formula evaluates to, in the figure's units), and names the three
+  ways out: declare, rewrite to an observed value, or remove. If the second
+  draft still fails, each failing figure is replaced by `（略※）` /
+  `(omitted※)` at its own span, bare-integer restatements of a cut figure are
+  swept too, a footnote says how many were omitted and why, and the whole
+  document — footnote included — must pass the same gate before release. The
+  canned fallback is left for an identity finding, a run that never observed a
+  price, or a cut that still fails. Drafts that triggered bounded
+  `search_symbol` / `get_market_data` recovery do not spend the correction
+  budget. The run stays `degraded` with a reason naming the redaction, the
+  release path's rechecks are not counted as rejected drafts, and the shipped
+  document is recorded under `released` in `artifacts/grounding_evidence.json`.
+- **A draft missing only a source or currency word gets a data note appended,
+  not another model round.** The canonical symbol is deliberately not repaired
+  this way: it is the figure's subject, and a note naming it under an answer
+  about another instrument would footnote a misattribution.
+- **The chat shows that the answer is being checked.** The agent loop emits
+  `grounding_status` (`{stage: "revising", round, issues}` after a rejection,
+  `{stage: "released_redacted", removed}` before a cut release), and the chat
+  page shows "Checking the figures in this answer (round N)…" until answer text
+  arrives, in all eight locales.
+
+### Fixed
+
+- **OpenAI's gpt-5.6 models run with their reasoning on the agent's default
+  configuration** (#1473). `/v1/chat/completions` refuses function tools for
+  `gpt-5.6-terra` and `gpt-5.6-luna` unless `reasoning_effort` is `none`,
+  including when no effort is configured and the model applies its own
+  default, so a plain `LANGCHAIN_PROVIDER=openai` setup failed on its first
+  tool call with `Function tools with reasoning_effort are not supported`.
+  The adapter now treats that refusal the way it treats a rejected
+  `temperature` or `stream_options`: the request is retried on
+  `/v1/responses`, where the effort travels as `reasoning.effort`, and the
+  model is remembered for the rest of the process so later calls go there
+  first. Nothing changes for a model whose chat endpoint accepts tools, and
+  `LANGCHAIN_USE_RESPONSES_API=true` still selects the route up front and
+  skips the one failed request.
+- **A redacted answer keeps its row numbers and its labels** (#1471). When the
+  grounding gate released a draft with its unverified figures cut, a ranked
+  table came back with `(omitted※)` in place of 1, 2, 3, of the `12m` in its
+  headers and of "3 names" in the prose. Every integer in a table cell was a
+  measurement, so the rank column was cut; and each cut figure's digits were
+  then swept out of the rest of the page, single digits included. Three shape
+  rules, no word list: a column whose numbered cells read 1, 2, 3 … in row
+  order is the table's index; a plain integer in a cell that also holds a
+  word (`12m mean return`, `Mean beta (9 reported)`) is read as it would be
+  in a sentence, while a cell that holds only a number, any decimal, percent
+  or currency figure, and every cell under an OHLC column stay measurements;
+  and the sweep never keys on a single digit. An integer price of an
+  instrument quoted in the thousands is still checked inside a worded cell.
+- **One cash-starved open is one rejection, not twenty-six** (#1470). In
+  `position_adjustment="hold"`, the search that scales a basket down to the
+  cash available re-planned every open on each step, and every step whose
+  size rounded to zero booked a `zero_size` rejection for the same symbol on
+  the same bar — one contract the cash could not hold read as 26 lot-rounding
+  failures. The trial plans are silent now; a sleeve that was a real order at
+  full scale and left the basket is reported once, after the search, as
+  `insufficient_capital`, which the rebalance path's dropped sleeves now use
+  too. `zero_size` means the lot rule and nothing else.
+- **A real VaR result grounds the VaR it returned** (#1464). `quantlib_call`
+  records a scalar result under the function name. For `historical_var` and
+  `parametric_var` that name reduces to `var`, which the grounding gate accepts
+  only as a whole field name, so the result recorded no evidence and a correct
+  answer quoting it was rejected. Both names are now tail-risk aliases.
+  Variances such as `residual_var` stay unmapped.
+- **Twenty alphas no longer fill a missing input with a constant** (#1463).
+  A halt left a comparison reading 0 or False, a `.where(cond, 0)` reading a
+  flat day, or an `np.fmax` returning the other side, and the value then fed
+  every rolling window that reached back to the gap. Those cells are NaN now.
+  On gap-free data every finite value is bit-identical to before. A
+  perturbation sweep over all 462 alphas counts 35 still carrying a missing
+  bar forward, down from 55, and every one of them is accounted for: 28 are
+  recursive statistics (the GTJA `SMA(A, n, m)` smoothers and one running
+  product), which by the policy set on #1463 skip a missing observation and
+  continue from their last state — the operator layer's header now states
+  that exception, and a test pins it; 3 declare their own partial window; 4
+  are the sweep's own rank-tie artifact. Nothing rewarms a smoother after a
+  gap, and the registry's look-back mask was measured and rejected: it hid
+  4,270 legitimate cells to remove 41% of the fabricated ones.
+- **A `local:` code in a backtest is served from your own dataset or not at
+  all** (#1467). The market-data tool and the README already treated
+  `local:AAPL.US` this way, but the backtest runner did not. With
+  `source="local"` it counted the served `AAPL.US` as missing and sent it down
+  the A-share network fallback chain. With `source="auto"` it ignored the
+  prefix and fetched the symbol from network loaders. The prefix now picks the
+  local loader only, a symbol the dataset lacks fails with
+  `incomplete data for source=local`, and the rest of the run sees the bare
+  symbol: market rules, artifacts (`ohlcv_AAPL.US.csv`, no colon in the file
+  name) and the run card. A `local:` code requested from a network source, or
+  one symbol requested both with and without the prefix, is refused up front.
+- **Event-study z-statistics no longer over-reject** (#1466). A CAR's standard
+  error summed each day's variance, ignoring that every day is forecast with
+  the same estimated parameters, so the days' abnormal returns are correlated.
+  On null data, the standardised CAR's variance was 1.11 with a 120-day
+  estimation window and 1.41–1.46 with a 30-day one. It is now 1.02 and 1.07,
+  which is only the t correction for an estimated residual variance. Patell and
+  BMP inherit the fix; `market_adjusted` was already right.
+- **Robinhood live trading reads and trades the account the mandate names**
+  (#1442). The runner, the pre-trade gate and the commit-time ceiling fetch
+  called Robinhood with no `account_number`, and read replies one level too
+  shallow (`data.positions` where Robinhood nests `data.data.positions`). So
+  every reconciliation aborted, and the gate refused every order because it
+  could not read positions. The tests stayed green only because their fake
+  replies had a shape Robinhood never sends. A Robinhood mandate is now bound
+  at commit to one account from `get_accounts`: listed, not deactivated, and
+  open to agentic trading. The Web confirm dialog and the CLI both ask for
+  it, and never take it from the agent-written proposal. Every runner and gate
+  call sends that account, and an order naming another account is refused.
+  Held positions, which Robinhood reports without a price, are priced the way
+  a quantity order already was, and one that cannot be priced fails the
+  exposure check closed. Existing Robinhood mandates must be committed again
+  with an account.
+
+- **Plain integers in prose are not price claims.** A list number ("输出原则
+  4"), a window length or a count was checked like a quoted price and could be
+  cut from a released answer.
+- **A drawdown against an observed high passes wherever the endpoints are
+  written.** "较 5 月高点 1.053 元已回撤约 37%" was rejected when its endpoints sat
+  on another line; a `derived` declaration does not depend on layout.
+- **Price-denominated indicator values are evidence, by registration.**
+  Moving averages, Bollinger bands and similar levels returned by
+  `technical_indicators` are registered per tool as observed price evidence;
+  RSI, MACD and other non-price leaves are not, and nothing is decided from a
+  field name's words.
+- **A year-less date is a date, and "24.6M" is 24.6 million.** Two real runs
+  that followed the contract were still released redacted: "2026-09-11 /
+  09-14" in a table cell shipped as "2026-09-11 /（略※）-（略※）", and
+  "24.6M → 22.6M lots" as "(omitted※)M → (omitted※)M". A zero-padded MM-DD,
+  or one opened by a full date in the same cell or line, is structure (an
+  unpadded "| 11-12 |" is still checked, since it may be a price range). K / M
+  / B / 千 / 万 / 亿 glued to a figure scale its comparison with the evidence,
+  never its shape, and a cut removes the mark with the figure. Replayed on
+  both runs' tool results, each second draft now passes as written.
+- **Metadata counts are not metrics, and a tool's tail-risk result can ground
+  a VaR** (#1420, #1426). `return_observations`, `n_returns`, `return_window`,
+  `vol_lookback`, `max_drawdown_duration`, `aligned_days` and their `*_window` /
+  `*_lookback` / `*_obs` / `n_*` / `*_count` / `*_days` / `*_duration` families
+  no longer ground a percentage ("年化收益 81%" from 81 observations); `var`,
+  `var_95`, `var_99`, `cvar`, `es` and `expected_shortfall` leaves are tail-risk
+  evidence, so a correct VaR is no longer refused. A field's metric comes from
+  the head of its name, so `sharpe_sample_size` and `drawdown_threshold` are
+  no longer a Sharpe ratio or a drawdown.
+- **A correction names the prints of the figure's own instrument** (#1433). The
+  "nearest observed" values come from that symbol (and its table column or
+  `ref`), not from every field of every symbol in the run.
+- **A number is read the way the chat renders it** (#1418). Zero-width
+  characters, a full-width or Arabic decimal point, a no-break space before
+  "%", the U+2212 minus sign, a backslash escape ("0\\.888"), an HTML entity
+  and an ISO code glued to the digits ("CNY0.888") no longer split a price into
+  unchecked integers; a decimal comma ("0,666 CNY", "12,5 %") is a decimal
+  while a valid grouping ("-1,250.00") stays grouped, and an answer that writes
+  a marked decimal comma reads "2,237" and "−5,132%" beside it as decimals too. Fences follow CommonMark,
+  and an unterminated code fence no longer exempts the rest of the answer.
+- **A year is not a price shield.** "$2050", "1999 元" and a 2031 under a close
+  column are checked; a price placed in a date or code column is checked; a
+  compact date, a dotted date and a time are structure. 円 and 원 are currency
+  marks, and "52pp" / "5200bp" are measurements.
+- **A declaration cannot relocate or launder a figure.** A figure the sentence
+  writes about one instrument cannot be declared another's close; a
+  currency-marked result cannot be derived from an RSI or a volume; `count`,
+  `derived` and `proposed` cannot sit in a price column.
+- **A general answer with no tool evidence is cut, not refused.** A question
+  about no instrument ("印花税怎么收") whose figures the gate cannot check is
+  released with those figures omitted and a footnote, instead of a refusal
+  about prices it never mentioned; a market answer that observed no price
+  still falls back. A malformed figures block no longer forces the fallback
+  either: the block is dropped and the draft is checked as written.
+- **The tool-call-syntax fallback reaches the chat once.** When a model answered
+  the forced-text iteration with tool-call markup in a run whose output is
+  buffered, the replacement message was streamed by its own branch and again as
+  the released answer, so the chat and the CLI showed it twice.
+- **No unchecked number reaches the chat before the gate runs.** An unbuffered
+  answer (no instrument asked about, no tool evidence yet) streamed its first
+  draft live, numbers included, and a rejection then replaced it; the stream now
+  stops at the first measurement-shaped number, and a rejected draft's shown
+  prefix is cleared with `stream_reset`.
+- **A trading plan in a bare code fence is checked.** Only a fence tagged with a
+  language holds code; an untagged fence is read as prose.
+- **An integer price of an instrument quoted in the thousands is checked**
+  ("600519.SH 最新收盘 1520"), within half to twice its observed range; a
+  window such as "200 日均线" stays unchecked.
+- **A price declared `count` is checked.** A number inside its instrument's
+  observed price range may be a `count` only when a declared derivation uses it
+  as a factor.
+- **A redaction footnote the model wrote itself is removed** before the real
+  cuts, so a released answer never carries two contradictory footnotes or a
+  marker for a cut that did not happen.
 ## [0.1.15] — 2026-09-09
 
 Rolls up 551 commits / 162 merged pull requests since 0.1.14, from 35

@@ -14,6 +14,7 @@ Tool execution:
 from __future__ import annotations
 
 import concurrent.futures
+import contextvars
 import copy
 import json
 import logging
@@ -29,6 +30,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from src.agent.context import ContextBuilder
 from src.agent.grounding import GroundingLedger
+from src.agent.grounding.release import MAX_GROUNDING_REVISIONS
 from src.agent.memory import WorkspaceMemory
 from src.agent.progress import HeartbeatTimer, ProgressEvent, _set_emitter
 from src.agent.tool_progress import RECOVERY_MESSAGE, ToolProgress
@@ -42,6 +44,7 @@ from src.goal.context import (
     goal_progress_tuple,
 )
 from src.providers.chat import ChatLLM, LLMRuntimeSnapshot, ProviderStreamError
+from src.providers.session_context import bind_llm_session_id, reset_llm_session_id
 from src.providers.content_filter import (
     CONTENT_FILTER_SKIP_MESSAGE,
     MAX_CONSECUTIVE_CONTENT_FILTER_SKIPS,
@@ -1181,6 +1184,27 @@ class AgentLoop:
     def run(self, user_message: str, history: Optional[List[Dict[str, Any]]] = None, session_id: str = "") -> Dict[str, Any]:
         """Run the ReAct loop synchronously.
 
+        Binds ``session_id`` as the active LLM session for the whole run so
+        provider adapters that need a stable per-conversation identity
+        (OpenCode Go's ``x-opencode-session``) can read it at request time.
+
+        Args:
+            user_message: User message.
+            history: Prior conversation messages.
+            session_id: Session ID.
+
+        Returns:
+            Execution result dict.
+        """
+        token = bind_llm_session_id(session_id)
+        try:
+            return self._run_bound(user_message, history, session_id)
+        finally:
+            reset_llm_session_id(token)
+
+    def _run_bound(self, user_message: str, history: Optional[List[Dict[str, Any]]] = None, session_id: str = "") -> Dict[str, Any]:
+        """Run the ReAct loop with the LLM session already bound.
+
         Args:
             user_message: User message.
             history: Prior conversation messages.
@@ -1272,6 +1296,7 @@ class AgentLoop:
         content_filter_circuit_breaker = False
         empty_model_response_iter: int | None = None
         consecutive_empty_responses = 0
+        grounding_revisions = 0
         llm_usage_summary = _new_llm_usage_summary(self.llm)
         last_response_model: str | None = None
         goal_continuations = 0
@@ -1392,10 +1417,41 @@ class AgentLoop:
                     self._grounding and self._grounding.should_buffer_output
                 )
 
+                streamed_chars = 0
+                stream_total = 0
+                stream_frozen = False
+
                 def _on_text_chunk(delta: str) -> None:
+                    nonlocal streamed_chars, stream_total, stream_frozen
                     thinking_chunks.append(delta)
-                    if not buffer_text_output:
+                    stream_total += len(delta)
+                    if buffer_text_output or stream_frozen:
+                        return
+                    # Neither the figures block nor an unchecked measurement streams
+                    # (see streamable_length). Only a fence character or a digit
+                    # can hold text back, so any other chunk is emitted as it
+                    # arrives instead of re-parsing the whole answer.
+                    if streamed_chars + len(delta) == stream_total and not any(
+                        char in "`~" or char.isdigit() for char in delta
+                    ):
                         self._emit("text_delta", {"delta": delta, "iter": current_iter})
+                        streamed_chars = stream_total
+                        return
+                    text = "".join(thinking_chunks)
+                    safe = (
+                        self._grounding.streamable_length(text)
+                        if self._grounding is not None
+                        else len(text)
+                    )
+                    if self._grounding is not None and safe < len(text):
+                        # Held at a measurement: nothing after it streams this turn.
+                        stream_frozen = self._grounding.measurement_start(text) == safe
+                    if safe > streamed_chars:
+                        self._emit(
+                            "text_delta",
+                            {"delta": text[streamed_chars:safe], "iter": current_iter},
+                        )
+                        streamed_chars = safe
 
                 def _on_reasoning_chunk(delta: str) -> None:
                     # Throttled: long reasoning streams produce hundreds of
@@ -1478,6 +1534,9 @@ class AgentLoop:
                         },
                     )
                     thinking_chunks.clear()
+                    streamed_chars = 0
+                    stream_total = 0
+                    stream_frozen = False
                     reasoning_chars = 0
                     last_reasoning_emit = None
                     # Wait on the cancel event, not time.sleep: the delay now
@@ -1562,7 +1621,14 @@ class AgentLoop:
                     if not buffer_text_output:
                         self._emit(
                             "thinking_done",
-                            {"iter": current_iter, "content": thinking_text[:500]},
+                            {
+                                "iter": current_iter,
+                                "content": (
+                                    thinking_text[: self._grounding.streamable_length(thinking_text)]
+                                    if self._grounding is not None
+                                    else thinking_text
+                                )[:500],
+                            },
                         )
 
                 # Content-filter skip: provider blocked the response — continue
@@ -1593,6 +1659,7 @@ class AgentLoop:
 
                 if not response.has_tool_calls:
                     final_content = response.content or ""
+                    syntax_fallback_emitted = False
                     if not final_content:
                         empty_model_response_iter = iteration
                         trace.write(
@@ -1669,8 +1736,38 @@ class AgentLoop:
                             "text_delta",
                             {"delta": final_content, "iter": current_iter},
                         )
+                        syntax_fallback_emitted = True
                     if self._grounding is not None:
                         validation = self._grounding.validate_final_answer(final_content)
+                        if not validation.valid:
+                            # A draft whose only defect is a missing provenance
+                            # word (source / currency / symbol suffix) gets the
+                            # word appended, not another multi-minute model round.
+                            repaired = self._grounding.repair_provenance(
+                                final_content, validation
+                            )
+                            if repaired is not None:
+                                # Non-recording: no model round produced this
+                                # text, and ``validation_count`` is the
+                                # rejected-draft number the user is shown.
+                                recheck = self._grounding.revalidate(repaired)
+                                if recheck.valid:
+                                    trace.write(
+                                        {
+                                            "type": "answer_repaired",
+                                            "iter": current_iter,
+                                            "issues": validation.issues,
+                                        }
+                                    )
+                                    react_trace.append(
+                                        {"type": "answer_repaired", "issues": validation.issues}
+                                    )
+                                    final_content = repaired
+                                    validation = recheck
+                        if validation.valid:
+                            # The figures block is the model's declaration to
+                            # the gate, not answer text.
+                            final_content = validation.released_text
                         if not validation.valid:
                             trace.write_text_entry(
                                 {
@@ -1682,6 +1779,13 @@ class AgentLoop:
                                 value=final_content,
                                 offload_kind=f"answer-rejected-{current_iter}",
                             )
+                            if not buffer_text_output and streamed_chars:
+                                # The stream showed this draft up to its first unchecked
+                                # number; the next draft or the released answer replaces it.
+                                self._emit(
+                                    "stream_reset",
+                                    {"iter": current_iter, "reason": "grounding_rejected"},
+                                )
                             react_trace.append(
                                 {
                                     "type": "answer_rejected",
@@ -1710,6 +1814,14 @@ class AgentLoop:
                                         "content": f"<system>{self._grounding.recovery_prompt(recovery, validation)}</system>",
                                     }
                                 )
+                                self._emit(
+                                    "grounding_status",
+                                    {
+                                        "stage": "revising",
+                                        "round": self._grounding.validation_count,
+                                        "issues": len(validation.issues),
+                                    },
+                                )
                                 final_content = ""
                                 continue
                             messages.append(
@@ -1718,27 +1830,102 @@ class AgentLoop:
                                     "content": f"<system>{self._grounding.correction_prompt(validation)}</system>",
                                 }
                             )
+                            rejected_draft = final_content
                             final_content = ""
-                            # One extra revision when real iteration budget remains;
-                            # each revision costs one iteration, so without budget the
-                            # run must stop revising and release the safe fallback.
-                            revision_cap = 4 if self.max_iterations - iteration >= 3 else 3
+                            # The budget counts drafts rejected on this
+                            # correction path; the last one is released with
+                            # its figures cut. A draft that triggered bounded
+                            # recovery is not counted (it re-fetches evidence
+                            # rather than rewording), so a run that had to
+                            # resolve its symbol first still gets a corrected
+                            # draft.
+                            grounding_revisions += 1
                             if (
                                 iteration < self.max_iterations
-                                and self._grounding.validation_count < revision_cap
+                                and grounding_revisions < MAX_GROUNDING_REVISIONS
                             ):
+                                self._emit(
+                                    "grounding_status",
+                                    {
+                                        "stage": "revising",
+                                        "round": self._grounding.validation_count,
+                                        "issues": len(validation.issues),
+                                    },
+                                )
                                 continue
-                            final_content = self._grounding.safe_fallback()
+                            # Out of revisions. The last draft is still the
+                            # analysis the user waited minutes for; release it
+                            # with the rejected figures cut out and re-checked
+                            # by the same gate. The canned refusal is only for
+                            # what cannot be cut: an identity finding, a run
+                            # that never observed a price, or a cut that still
+                            # fails validation.
+                            rejected_drafts = self._grounding.validation_count
+                            released = self._grounding.redacted_release(
+                                rejected_draft, validation
+                            )
+                            if released is not None:
+                                trace.write(
+                                    {
+                                        "type": "answer_released_redacted",
+                                        "iter": current_iter,
+                                        "issues": validation.issues,
+                                    }
+                                )
+                                react_trace.append(
+                                    {
+                                        "type": "answer_released_redacted",
+                                        "issues": validation.issues,
+                                    }
+                                )
+                                final_content = released
+                                self._emit(
+                                    "grounding_status",
+                                    {
+                                        "stage": "released_redacted",
+                                        "removed": self._grounding.figures_removed,
+                                    },
+                                )
+                                self._released_fallback_reason = (
+                                    "final answer released with unverified figures "
+                                    f"redacted after {rejected_drafts} rejected drafts"
+                                )
+                            else:
+                                final_content = self._grounding.safe_fallback()
+                                # Captured HERE, beside the redacted branch's
+                                # own count. Left unset, the reason was built
+                                # lazily at the end of the run from a
+                                # ``validation_count`` the release path's
+                                # rechecks had already moved.
+                                self._released_fallback_reason = (
+                                    "final answer degraded to the deterministic "
+                                    f"fallback after {rejected_drafts} rejected "
+                                    "drafts could not be corrected within the "
+                                    "iteration budget"
+                                )
                             self._released_fallback = True
                             self._emit(
                                 "text_delta",
                                 {"delta": final_content, "iter": current_iter},
                             )
-                        elif buffer_text_output:
+                        elif buffer_text_output and not syntax_fallback_emitted:
                             self._emit(
                                 "text_delta",
                                 {"delta": final_content, "iter": current_iter},
                             )
+                        elif not self._released_fallback and not syntax_fallback_emitted:
+                            # Flush a held-back last line that never became a
+                            # figures fence; a stripped block leaves nothing.
+                            shown = "".join(thinking_chunks)[:streamed_chars]
+                            if not final_content.startswith(shown):
+                                # Stripping the block also trims the blank lines
+                                # the stream already showed before its fence.
+                                shown = shown.rstrip()
+                            if final_content.startswith(shown) and len(final_content) > len(shown):
+                                self._emit(
+                                    "text_delta",
+                                    {"delta": final_content[len(shown):], "iter": current_iter},
+                                )
                     should_continue_goal = False
                     continuation_snapshot = None
                     _max_cont = _goal_max_continuations()
@@ -1824,6 +2011,17 @@ class AgentLoop:
                     react_trace.append({"type": "answer", "content": final_content[:500]})
                     break
 
+                if not buffer_text_output and self._grounding is not None:
+                    # The turn is over, so a held-back last line is complete: it is
+                    # shown unless it opens a figures block.
+                    turn_text = "".join(thinking_chunks)
+                    safe = min(len(turn_text), self._grounding.streamable_length(turn_text + "\n"))
+                    if safe > streamed_chars:
+                        self._emit(
+                            "text_delta",
+                            {"delta": turn_text[streamed_chars:safe], "iter": current_iter},
+                        )
+                        streamed_chars = safe
                 assistant_message = context.format_assistant_tool_calls(
                     response.tool_calls,
                     content=response.content,
@@ -2990,8 +3188,12 @@ class AgentLoop:
                     _compact_error.append(exc)
 
             if _compact_timeout > 0:
+                # A new thread starts with an empty context, so the session
+                # bound by run() (x-opencode-session, #1416) would not reach
+                # this call: run it inside a copy of the caller's context.
                 worker = threading.Thread(
-                    target=_run_compact_summary,
+                    target=contextvars.copy_context().run,
+                    args=(_run_compact_summary,),
                     name="compact-summary",
                     daemon=True,
                 )
