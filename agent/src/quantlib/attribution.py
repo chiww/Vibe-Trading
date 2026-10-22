@@ -247,12 +247,28 @@ def brinson_fachler(
     Raises:
         ValueError: If no sectors were supplied, if the two weight vectors do not
             sum to the same total within ``weight_sum_tolerance``, or if a sector
-            carries a non-zero weight on a side but no return on that side.
+            carries a non-zero weight on a side but no return on that side,
+            if a weight or resolved return is non-finite, or if the tolerance
+            is non-finite or negative.
     """
     ordered: list[str] = list(portfolio_weights)
-    ordered.extend(sector for sector in benchmark_weights if sector not in portfolio_weights)
+    ordered.extend(
+        sector for sector in benchmark_weights if sector not in portfolio_weights
+    )
     if not ordered:
         raise ValueError("brinson_fachler needs at least one sector")
+
+    if not math.isfinite(weight_sum_tolerance) or weight_sum_tolerance < 0.0:
+        raise ValueError("weight_sum_tolerance must be finite and non-negative")
+    for side, weights in (
+        ("portfolio", portfolio_weights),
+        ("benchmark", benchmark_weights),
+    ):
+        for sector, weight in weights.items():
+            if not math.isfinite(weight):
+                raise ValueError(
+                    f"sector {sector!r} has non-finite {side} weight {weight!r}"
+                )
 
     portfolio_total = math.fsum(portfolio_weights.values())
     benchmark_total = math.fsum(benchmark_weights.values())
@@ -271,14 +287,25 @@ def brinson_fachler(
         r_b = benchmark_returns.get(sector)
         if r_p is None:
             if w_p != 0.0:
-                raise ValueError(f"sector {sector!r} has portfolio weight {w_p!r} but no portfolio return")
+                raise ValueError(
+                    f"sector {sector!r} has portfolio weight {w_p!r} but no portfolio return"
+                )
             if r_b is None:
-                raise ValueError(f"sector {sector!r} has no portfolio return and no benchmark return")
+                raise ValueError(
+                    f"sector {sector!r} has no portfolio return and no benchmark return"
+                )
             r_p = r_b
         if r_b is None:
             if w_b != 0.0:
-                raise ValueError(f"sector {sector!r} has benchmark weight {w_b!r} but no benchmark return")
+                raise ValueError(
+                    f"sector {sector!r} has benchmark weight {w_b!r} but no benchmark return"
+                )
             r_b = r_p
+        for side, value in (("portfolio", r_p), ("benchmark", r_b)):
+            if not math.isfinite(value):
+                raise ValueError(
+                    f"sector {sector!r} has non-finite {side} return {value!r}"
+                )
         resolved.append((sector, w_p, w_b, float(r_p), float(r_b)))
 
     total_portfolio_return = math.fsum(w_p * r_p for _, w_p, _, r_p, _ in resolved)
@@ -330,8 +357,11 @@ def carino_factor(portfolio_return: float, benchmark_return: float) -> float:
 
     Raises:
         ValueError: If either return is at or below -100%, which would make the
-            wealth relative non-positive and the logarithm undefined.
+            wealth relative non-positive and the logarithm undefined, or if
+            either return is non-finite.
     """
+    if not math.isfinite(portfolio_return) or not math.isfinite(benchmark_return):
+        raise ValueError("Carino linking needs finite portfolio and benchmark returns")
     portfolio_wealth = 1.0 + portfolio_return
     benchmark_wealth = 1.0 + benchmark_return
     if portfolio_wealth <= 0.0 or benchmark_wealth <= 0.0:
@@ -339,9 +369,16 @@ def carino_factor(portfolio_return: float, benchmark_return: float) -> float:
             "Carino linking needs returns above -100%; got portfolio "
             f"{portfolio_return!r} and benchmark {benchmark_return!r}"
         )
-    if abs(portfolio_return - benchmark_return) < _CARINO_LIMIT_EPS:
+    # Near coincidence is relative to the remaining wealth, not to the
+    # returns' absolute scale: two returns close to -100% can differ by a
+    # tiny absolute amount while their wealth relatives differ severalfold.
+    if abs(portfolio_return - benchmark_return) < _CARINO_LIMIT_EPS * min(
+        portfolio_wealth, benchmark_wealth
+    ):
         return 2.0 / (portfolio_wealth + benchmark_wealth)
-    return (math.log(portfolio_wealth) - math.log(benchmark_wealth)) / (portfolio_return - benchmark_return)
+    return (math.log(portfolio_wealth) - math.log(benchmark_wealth)) / (
+        portfolio_return - benchmark_return
+    )
 
 
 def carino_link(periods: Sequence[BrinsonResult]) -> LinkedAttribution:
@@ -375,7 +412,8 @@ def carino_link(periods: Sequence[BrinsonResult]) -> LinkedAttribution:
     total_factor = carino_factor(total_portfolio_return, total_benchmark_return)
 
     scaling_factors = tuple(
-        carino_factor(period.portfolio_return, period.benchmark_return) / total_factor for period in periods
+        carino_factor(period.portfolio_return, period.benchmark_return) / total_factor
+        for period in periods
     )
 
     order: list[str] = []

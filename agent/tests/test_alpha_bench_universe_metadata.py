@@ -91,6 +91,11 @@ def test_csi300_reports_point_in_time_membership(
         "constituent_count": 3,
         "price_adjustment": "qfq",
         "dropped_unadjustable": 0,
+        # Sector labels attach later in _prepare_bench_panel, outside the
+        # pickled price panel; the load-time defaults are the disclosure for
+        # a run where the attach never happens or degrades.
+        "sector_source": None,
+        "sector_coverage": 0.0,
     }
 
 
@@ -141,6 +146,8 @@ def test_csi300_reports_hand_picked_fallback(
         "constituent_count": 2,
         "price_adjustment": "qfq",
         "dropped_unadjustable": 0,
+        "sector_source": None,
+        "sector_coverage": 0.0,
     }
 
 
@@ -164,10 +171,8 @@ def test_sp500_source_date_matches_the_roster(
         def fetch(self, *_args, **_kwargs) -> dict:
             return {}
 
-    import backtest.loaders.registry as registry
-
     monkeypatch.setattr(tool, "_fetch_sp500_constituents", lambda: (codes, {}))
-    monkeypatch.setattr(registry, "resolve_loader", lambda _market: _Loader())
+    monkeypatch.setattr("src.market_data.get_loader", lambda _source: _Loader)
 
     panel = tool._load_sp500_panel("2024-01-01", "2024-01-31")
 

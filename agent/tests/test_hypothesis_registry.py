@@ -128,6 +128,31 @@ def test_link_backtest_run_card(storage_path: Path) -> None:
     assert link["notes"] == "First daily vectorized run."
 
 
+def test_link_backtest_tool_forwards_validation_evidence(storage_path: Path) -> None:
+    """The validation evidence an agent attaches via the tool must reach the
+    persisted run card, not be silently dropped on the way to the registry.
+    """
+    registry = HypothesisRegistry()
+    hyp = registry.create(title="ETF momentum", thesis="ETF momentum persists monthly.")
+
+    result = json.loads(
+        LinkBacktestTool().execute(
+            hypothesis_id=hyp.hypothesis_id,
+            backtest_run_dir="/tmp/backtest_run",
+            metrics={"sharpe": 1.2},
+            validation={"monte_carlo": {"p_value_sharpe": 0.83, "n_simulations": 1000}},
+            notes="Attaching Monte Carlo permutation evidence.",
+        )
+    )
+
+    assert result["status"] == "ok"
+    link = result["hypothesis"]["run_cards"][0]
+    assert link["validation"] == {"monte_carlo": {"p_value_sharpe": 0.83, "n_simulations": 1000}}
+
+    persisted = HypothesisRegistry().list()[0]
+    assert persisted.run_cards[0]["validation"]["monte_carlo"]["p_value_sharpe"] == 0.83
+
+
 def test_search_by_text_and_status(storage_path: Path) -> None:
     registry = HypothesisRegistry()
     crypto = registry.create(
@@ -149,6 +174,19 @@ def test_search_by_text_and_status(storage_path: Path) -> None:
     status_results = registry.search(status="exploring")
     assert len(status_results) == 1
     assert status_results[0].title == "Dividend drift"
+
+
+def test_search_limit_zero_returns_no_results(storage_path: Path) -> None:
+    registry = HypothesisRegistry()
+    registry.create(
+        title="Funding squeeze",
+        thesis="Crowded negative funding predicts squeeze.",
+        status="testing",
+        universe="Crypto perps",
+    )
+
+    assert registry.search(query="funding", limit=0) == []
+    assert registry.search(query="funding", limit=-5) == []
 
 
 def test_tool_wrappers_use_env_isolated_storage(storage_path: Path) -> None:

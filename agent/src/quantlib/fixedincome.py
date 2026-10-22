@@ -118,6 +118,21 @@ def year_fraction(
     return total
 
 
+def _require_finite(**values: float | np.ndarray) -> None:
+    """Raise when a named numeric input holds NaN or an infinity.
+
+    Every range check in this module is a comparison (``face <= 0``) and a
+    comparison with NaN is False, so a NaN walked past each of them and came
+    out as a NaN price, duration or curve.
+
+    Raises:
+        ValueError: Naming the first non-finite input.
+    """
+    for name, value in values.items():
+        if not np.all(np.isfinite(np.asarray(value, dtype=float))):
+            raise ValueError(f"{name} must be finite, got {value!r}")
+
+
 def _is_leap(year: int) -> bool:
     """Report whether a Gregorian year is a leap year.
 
@@ -158,15 +173,37 @@ def accrued_interest(
         Accrued interest in the same currency units as ``face``.
 
     Raises:
-        ValueError: If ``freq`` is not positive, if the coupon dates are not
-            ordered, or if ``settlement`` falls outside the coupon period.
+        ValueError: If any numeric input is non-finite, if ``freq`` is not
+            positive, if the coupon dates are not ordered, if ``settlement``
+            falls outside the coupon period, or if ``day_count`` is not a
+            recognised convention.
     """
+    # Before the endpoint shortcuts: settling exactly on a coupon date returns
+    # a constant, which would otherwise launder a NaN face or rate into a
+    # clean-looking 0.0.
+    _require_finite(face=face, coupon_rate=coupon_rate, freq=freq)
     if freq <= 0:
         raise ValueError(f"freq must be positive, got {freq}")
     if not last_coupon < next_coupon:
         raise ValueError("last_coupon must precede next_coupon")
     if not last_coupon <= settlement <= next_coupon:
         raise ValueError("settlement must fall inside [last_coupon, next_coupon]")
+    # Checked here as well as in year_fraction: the endpoint returns below never
+    # reach year_fraction, so an unknown convention would otherwise pass there.
+    if day_count not in DAY_COUNT_CONVENTIONS:
+        raise ValueError(
+            f"unknown day_count {day_count!r}; expected one of {DAY_COUNT_CONVENTIONS}"
+        )
+
+    # 30/360 and 30E/360 clip the day-of-month, so distinct calendar dates
+    # (e.g. Jan 30 -> Jan 31) can still year_fraction to 0.0. last_coupon <
+    # next_coupon is already guaranteed above, so that can never mean a
+    # true zero-length period -- checking settlement's own position against
+    # the coupon dates keeps the endpoints correct regardless.
+    if settlement == last_coupon:
+        return 0.0
+    if settlement == next_coupon:
+        return face * coupon_rate / freq
 
     period = year_fraction(last_coupon, next_coupon, day_count)
     if period == 0.0:
@@ -195,9 +232,13 @@ def bond_cashflows(
         ``periods / freq``.
 
     Raises:
-        ValueError: If ``face`` is not positive, if ``n_periods`` is not a
-            positive integer, or if ``freq`` is not positive.
+        ValueError: If any numeric input is non-finite, if ``face`` is not
+            positive, if ``n_periods`` is not a positive integer, or if
+            ``freq`` is not positive.
     """
+    # freq too: with an infinite frequency every coupon collapses to zero and
+    # the schedule reprices to a plausible-looking par.
+    _require_finite(face=face, coupon_rate=coupon_rate, freq=freq)
     if face <= 0:
         raise ValueError(f"face must be positive, got {face}")
     if isinstance(n_periods, bool) or not isinstance(n_periods, (int, np.integer)) or n_periods <= 0:
@@ -218,6 +259,7 @@ def _discount_factors(
     compounding: str,
 ) -> np.ndarray:
     """Compute discount factors for period indices under discrete or continuous compounding."""
+    _require_finite(ytm=ytm)
     if compounding == "discrete":
         periodic = 1.0 + ytm / freq
         if periodic <= 0.0:
@@ -287,9 +329,13 @@ def ytm_solve(
         Annual yield to maturity as a decimal.
 
     Raises:
-        ValueError: If the price is not reachable inside ``bracket``.
+        ValueError: If ``price`` or a bracket bound is non-finite, or if the
+            price is not reachable inside ``bracket``.
     """
     low, high = bracket
+    # NaN fails ``low >= high`` and every solver evaluation; name the input
+    # instead of reporting a bracket that "cannot reprice" it.
+    _require_finite(price=price, bracket_low=low, bracket_high=high)
     if low >= high:
         raise ValueError(f"bracket must be increasing, got {bracket}")
 
@@ -390,11 +436,15 @@ def key_rate_duration(
         Dict mapping each key rate tenor (float) to its Key Rate Duration (float in years).
 
     Raises:
-        ValueError: If key_rates is empty or not strictly increasing, or schedule/compounding invalid.
+        ValueError: If key_rates is empty, non-finite or not strictly
+            increasing, or schedule/compounding invalid.
     """
     kr = np.asarray(key_rates, dtype=float)
     if kr.size == 0:
         raise ValueError("key_rates must contain at least one tenor")
+    # A NaN tenor is neither empty nor non-increasing, so it sailed past both
+    # checks and came back as a NaN key in the result dict.
+    _require_finite(key_rates=kr)
     if (np.diff(kr) <= 0.0).any():
         raise ValueError(f"key_rates must be strictly increasing, got {key_rates}")
 
@@ -494,10 +544,14 @@ def dv01(
         positive number.
 
     Raises:
-        ValueError: If ``face`` is zero, or the schedule/compounding is invalid.
+        ValueError: If ``face`` is zero, if ``par_amount`` is non-finite, or
+            the schedule/compounding is invalid.
     """
     if face == 0:
         raise ValueError("face must be non-zero")
+    # face itself is admitted by the schedule checks downstream; par_amount
+    # never reaches them, so a NaN position size would scale into a NaN hedge.
+    _require_finite(par_amount=par_amount)
     d_mod = modified_duration(face, coupon_rate, ytm, n_periods, freq, compounding)
     price = bond_price(face, coupon_rate, ytm, n_periods, freq, compounding)
     return d_mod * (price / face) * 1e-4 * par_amount
@@ -523,6 +577,7 @@ def effective_duration(
     Raises:
         ValueError: If ``bump`` is not positive or the base price is zero.
     """
+    _require_finite(yield_level=yield_level, bump=bump)
     if bump <= 0:
         raise ValueError(f"bump must be positive, got {bump}")
     base = reprice(yield_level)
@@ -535,6 +590,7 @@ def effective_duration(
 
 def _decay_factors(tau: np.ndarray, lam: float) -> tuple[np.ndarray, np.ndarray]:
     """Compute Nelson-Siegel slope and curvature loadings for decay parameter lam."""
+    _require_finite(decay=lam)
     if lam <= 0:
         raise ValueError(f"decay parameter must be positive, got {lam}")
     x = tau / lam
@@ -548,6 +604,7 @@ def _as_tau(tau: float | Sequence[float] | np.ndarray) -> tuple[np.ndarray, bool
     arr = np.asarray(tau, dtype=float)
     was_scalar = arr.ndim == 0
     arr = np.atleast_1d(arr)
+    _require_finite(maturities=arr)
     if np.any(arr < 0):
         raise ValueError("maturities must be non-negative")
     return arr, was_scalar
@@ -561,6 +618,7 @@ def nelson_siegel(
     lambda1: float,
 ) -> float | np.ndarray:
     """Compute Nelson-Siegel zero rates for given maturities and parameters."""
+    _require_finite(beta0=beta0, beta1=beta1, beta2=beta2)
     arr, was_scalar = _as_tau(tau)
     slope, curve = _decay_factors(arr, lambda1)
     out = beta0 + beta1 * slope + beta2 * curve
@@ -577,6 +635,7 @@ def svensson(
     lambda2: float,
 ) -> float | np.ndarray:
     """Compute Svensson zero rates for given maturities and parameters."""
+    _require_finite(beta0=beta0, beta1=beta1, beta2=beta2, beta3=beta3)
     arr, was_scalar = _as_tau(tau)
     slope, curve1 = _decay_factors(arr, lambda1)
     _, curve2 = _decay_factors(arr, lambda2)
@@ -705,6 +764,8 @@ def fit_yield_curve(
     obs = np.asarray(yields, dtype=float)
     if tau.shape != obs.shape or tau.ndim != 1:
         raise ValueError("maturities and yields must be 1-D and the same length")
+    if not np.isfinite(tau).all() or not np.isfinite(obs).all():
+        raise ValueError("maturities and yields must contain only finite values")
     if np.any(tau <= 0):
         raise ValueError("maturities must be strictly positive")
 
@@ -716,6 +777,8 @@ def fit_yield_curve(
         )
 
     low, high = decay_bounds
+    if not np.isfinite(low) or not np.isfinite(high):
+        raise ValueError("decay_bounds must contain only finite values")
     if not 0 < low < high:
         raise ValueError(f"decay_bounds must satisfy 0 < low < high, got {decay_bounds}")
     grid = np.geomspace(low, high, grid_points)

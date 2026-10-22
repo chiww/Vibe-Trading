@@ -1,14 +1,12 @@
 import i18n from '@/i18n';
-import { Component, memo, useState, useCallback, type ReactNode } from "react";
+import { Component, lazy, memo, Suspense, useState, useCallback, type ReactNode } from "react";
 import { XCircle, RefreshCw, Copy, Check, Paperclip, Users, Target, Clock3 } from "lucide-react";
 import ReactMarkdown, { type Options as ReactMarkdownOptions } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
-import rehypeHighlight from "rehype-highlight";
-import rehypeKatex from "rehype-katex";
-import "katex/dist/katex.min.css";
 import { toast } from "sonner";
 import { normalizeMathDelimiters } from "@/lib/markdown";
+import { downloadGeneratedReport } from "@/lib/api";
 import type { AgentMessage } from "@/types/agent";
 import type { StoredAgentMessage } from "@/stores/agent";
 import { AgentAvatar } from "./AgentAvatar";
@@ -20,7 +18,8 @@ const remarkPlugins: ReactMarkdownOptions["remarkPlugins"] = [
   remarkGfm,
   [remarkMath, { singleDollarTextMath: false }],
 ];
-const rehypePlugins: ReactMarkdownOptions["rehypePlugins"] = [rehypeHighlight, rehypeKatex];
+// Math fonts and syntax highlighters are only needed for completed answers.
+const EnhancedMarkdown = lazy(() => import("./EnhancedMarkdown"));
 const markdownComponents: ReactMarkdownOptions["components"] = {
   table: ({ node, ...props }) => {
     void node;
@@ -32,6 +31,16 @@ const markdownComponents: ReactMarkdownOptions["components"] = {
   },
   a: ({ node, ...props }) => {
     void node;
+    const report = props.href?.match(/^\/api\/reports\/([0-9a-f]{32})$/);
+    if (report) {
+      return <a {...props} onClick={(event) => {
+        event.preventDefault();
+        const filename = event.currentTarget.textContent || "report.pdf";
+        void downloadGeneratedReport(report[1], filename).catch(() => {
+          toast.error(i18n.t("settings.unknownError"));
+        });
+      }} />;
+    }
     return <a {...props} target="_blank" rel="noopener noreferrer" />;
   },
 };
@@ -85,16 +94,24 @@ export const MarkdownContent = memo(function MarkdownContent({
     normalized = content;
   }
 
+  const structuralMarkdown = (
+    <ReactMarkdown remarkPlugins={remarkPlugins} components={markdownComponents}>
+      {normalized}
+    </ReactMarkdown>
+  );
+
   return (
-    <div className={proseClassName}>
+    <div className={`${proseClassName} vt-bidi`} dir="auto">
       <MarkdownErrorBoundary content={content}>
-        <ReactMarkdown
-          remarkPlugins={remarkPlugins}
-          rehypePlugins={streaming ? [] : rehypePlugins}
-          components={markdownComponents}
-        >
-          {normalized}
-        </ReactMarkdown>
+        {streaming ? structuralMarkdown : (
+          <Suspense fallback={structuralMarkdown}>
+            <EnhancedMarkdown
+              content={normalized}
+              remarkPlugins={remarkPlugins}
+              components={markdownComponents}
+            />
+          </Suspense>
+        )}
       </MarkdownErrorBoundary>
       {showCursor && (
         <span className="inline-block w-0.5 h-4 bg-primary ml-0.5 animate-pulse align-middle" />
@@ -146,7 +163,7 @@ function CopyButton({ text }: { text: string }) {
   return (
     <button
       onClick={handleCopy}
-      className="absolute top-2 right-2 p-1.5 rounded-md bg-muted/80 hover:bg-muted text-muted-foreground hover:text-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
+      className={`absolute top-2 end-2 p-1.5 rounded-md bg-muted/80 hover:bg-muted text-muted-foreground hover:text-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity`}
       aria-label={label}
       title={label}
     >
@@ -191,7 +208,7 @@ export const MessageBubble = memo(function MessageBubble({ msg, onRetry }: Props
       ?? (meta?.attachment ? [meta.attachment] : []);
     return (
       <div className="flex justify-end group">
-        <div className="max-w-[72%] max-h-[40vh] overflow-y-auto break-words rounded-[18px] bg-muted px-4 py-3 text-[15px] text-foreground leading-relaxed whitespace-pre-wrap">
+        <div dir="auto" className="max-w-[72%] max-h-[40vh] overflow-y-auto break-words rounded-[18px] bg-muted px-4 py-3 text-[15px] text-foreground leading-relaxed whitespace-pre-wrap">
           {meta && (attachments.length > 0 || meta.swarmMode || meta.goalMode) && (
             <div className="mb-1.5 flex flex-wrap justify-end gap-1.5 text-[10px] leading-none text-muted-foreground">
               {attachments.map((attachment, index) => (
@@ -257,7 +274,7 @@ export const MessageBubble = memo(function MessageBubble({ msg, onRetry }: Props
         <div className="space-y-2">
           <div className="flex items-start gap-2 rounded-xl border border-danger/30 bg-danger/5 px-4 py-3">
             <XCircle className="h-4 w-4 text-danger shrink-0 mt-0.5" />
-            <p className="text-sm text-danger leading-relaxed">{msg.content}</p>
+            <p dir="auto" className="text-sm text-danger leading-relaxed">{msg.content}</p>
           </div>
           {onRetry && (
             <div className="space-y-1.5">
@@ -282,7 +299,7 @@ export const MessageBubble = memo(function MessageBubble({ msg, onRetry }: Props
     return (
       <div className="flex gap-3">
         <AgentAvatar />
-        <p className="text-sm text-muted-foreground leading-relaxed">{msg.content}</p>
+        <p dir="auto" className="text-sm text-muted-foreground leading-relaxed">{msg.content}</p>
       </div>
     );
   }

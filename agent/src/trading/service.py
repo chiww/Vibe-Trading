@@ -16,6 +16,7 @@ RUNNER_CAPABILITY = "runner.manage.requires_mandate"
 #: ``get_account_snapshot``, ``get_positions``, ``get_open_orders``, ``get_quote``,
 #: ``get_historical_bars``).
 _SDK_CONNECTOR_MODULES = {
+    "mstock": "src.trading.connectors.mstock.sdk",
     "tiger": "src.trading.connectors.tiger.sdk",
     "longbridge": "src.trading.connectors.longbridge.sdk",
     "alpaca": "src.trading.connectors.alpaca.sdk",
@@ -131,9 +132,9 @@ def _sdk_config(
     #
     # Per-call overrides must still pass the connector's own allowlist. Every
     # SDK connector deliberately narrows what a caller may override — OKX and
-    # Binance both exclude ``readonly`` ("always true for this layer") and
-    # ``timeout``; Longbridge's overlay is ``profile``/``region`` only,
-    # precisely so a caller "cannot mix or bypass the shared resolver".
+    # Binance both exclude ``readonly`` and ``timeout``; Longbridge's overlay
+    # is ``profile``/``region`` only, precisely so a caller "cannot mix or
+    # bypass the shared resolver".
     # ``build_config`` applies that filter; constructing from a raw merged
     # mapping would not, and ``overrides`` is the one part of this payload that
     # reaches us from an MCP tool argument or a REST body.
@@ -374,6 +375,18 @@ def search_instruments(
             module.search_instruments(
                 query,
                 config=module.build_config(profile.config, overrides),
+                limit=limit,
+            ),
+        )
+    if profile.connector == "mt5" and profile.transport == "broker_sdk":
+        if "terminal_path" in overrides:
+            return {"status": "error", "error": "MT5 search uses the configured terminal path", "instruments": []}
+        module = _sdk_module(profile.connector)
+        return _with_profile(
+            profile,
+            module.search_instruments(
+                query,
+                config=_sdk_config(profile, module, overrides),
                 limit=limit,
             ),
         )

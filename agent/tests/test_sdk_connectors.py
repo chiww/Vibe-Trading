@@ -21,6 +21,7 @@ from src.trading.connectors.alpaca import sdk as al
 from src.trading.connectors.alpaca.classification import ALPACA_TOOL_CLASS
 from src.trading.connectors.binance import sdk as bn
 from src.trading.connectors.binance.classification import BINANCE_TOOL_CLASS
+from src.trading.connectors.mt5 import sdk as mt5
 from src.trading.connectors.dhan import sdk as dh
 from src.trading.connectors.dhan.classification import DHAN_TOOL_CLASS
 from src.trading.connectors.futu import sdk as ft
@@ -32,7 +33,6 @@ from src.trading.connectors.okx.classification import OKX_TOOL_CLASS
 from src.trading.connectors.shoonya import sdk as sh
 from src.trading.connectors.shoonya.classification import SHOONYA_TOOL_CLASS
 from src.trading.connectors.etoro import client as etoro_client
-from src.trading.connectors.etoro.classification import ETORO_TOOL_CLASS
 from src.trading.connectors.tiger import sdk as tg
 from src.trading.connectors.tiger.classification import TIGER_TOOL_CLASS
 
@@ -184,6 +184,32 @@ def test_longbridge_build_config_and_region(monkeypatch, tmp_path) -> None:
 def test_longbridge_invalid_region_rejected() -> None:
     with pytest.raises(lb.LongbridgeConfigError):
         lb.LongbridgeConfig.from_mapping({"region": "moon"})
+
+
+def test_longbridge_quote_context_uses_from_apikey_on_sdk_4(monkeypatch) -> None:
+    """SDK 4.0+ refuses ``Config(...)``; the connector must use the factory."""
+    factory_calls: list[tuple[str, ...]] = []
+    built = object()
+
+    class Sdk4Config:
+        def __new__(cls, *args: object, **kwargs: object) -> "Sdk4Config":
+            raise TypeError("cannot create 'builtins.Config' instances")
+
+        @staticmethod
+        def from_apikey(*args: str) -> object:
+            factory_calls.append(args)
+            return built
+
+    fake_openapi = SimpleNamespace(
+        Config=Sdk4Config, QuoteContext=lambda config: config
+    )
+    monkeypatch.setattr(lb, "_require_openapi", lambda: fake_openapi)
+    cfg = lb.LongbridgeConfig(
+        app_key="k", app_secret="s", access_token="t", _credential_source="environment"
+    )
+
+    assert lb._quote_context(cfg) is built
+    assert factory_calls == [("k", "s", "t")]
 
 
 def test_longbridge_with_overrides_preserves_atomic_credentials() -> None:
@@ -522,6 +548,32 @@ def test_binance_classification() -> None:
     assert BINANCE_TOOL_CLASS["load_markets"] is ToolClass.READ
 
 
+def test_binance_quote_uses_public_client_without_credentials(monkeypatch) -> None:
+    captured = {}
+
+    class FakeExchange:
+        def fetch_ticker(self, symbol):
+            assert symbol == "BTC/USDT"
+            return {"last": 75000}
+
+    def build_exchange(config):
+        captured["config"] = config
+        return FakeExchange()
+
+    monkeypatch.setattr(bn, "_exchange", build_exchange)
+    result = bn.get_quote(
+        "BTCUSDT",
+        config=bn.BinanceConfig(
+            api_key="private-key", api_secret="private-secret", profile="live-readonly"
+        ),
+    )
+
+    assert result["quote"]["last"] == 75000
+    assert captured["config"].api_key == ""
+    assert captured["config"].api_secret == ""
+    assert captured["config"].host == bn.LIVE_HOST
+
+
 def test_binance_search_instruments_resolves_exact_active_spot_pair(monkeypatch) -> None:
     class FakeExchange:
         def load_markets(self):
@@ -606,6 +658,26 @@ def test_service_routes_instrument_search_to_selected_binance_profile(monkeypatc
     assert result["connector"] == "binance"
 
 
+def test_service_routes_instrument_search_to_selected_mt5_profile(monkeypatch) -> None:
+    captured = {}
+
+    def _build_config(profile_config, overrides):
+        return SimpleNamespace(profile=profile_config["profile"])
+
+    def _search(query, *, config, limit):
+        captured.update(query=query, profile=config.profile, limit=limit)
+        return {"status": "ok", "instruments": [{"symbol": "XAUUSDm"}]}
+
+    monkeypatch.setattr(mt5, "build_config", _build_config)
+    monkeypatch.setattr(mt5, "search_instruments", _search)
+
+    result = service.search_instruments("XAUUSD", "mt5-paper-sdk", limit=3)
+
+    assert captured == {"query": "XAUUSD", "profile": "paper", "limit": 3}
+    assert result["profile_id"] == "mt5-paper-sdk"
+    assert result["connector"] == "mt5"
+
+
 def test_binance_service_unconfigured(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(bn, "get_runtime_root", lambda: tmp_path)
     result = service.check_connection("binance-paper-sdk")
@@ -664,6 +736,111 @@ def test_binance_exchange_adjusts_for_server_time(monkeypatch) -> None:
     assert captured["sandbox"] is False
 
 
+def test_binance_account_read_resyncs_once_when_timestamp_is_ahead(monkeypatch) -> None:
+    class FakeExchange:
+        def __init__(self):
+            self.options = {"timeDifference": 0}
+            self.reads = 0
+            self.syncs = 0
+
+        def fetch_balance(self):
+            self.reads += 1
+            if self.reads == 1:
+                raise RuntimeError(
+                    'binance {"code":-1021,"msg":"Timestamp for this request was '
+                    '1000ms ahead of the server\'s time."}'
+                )
+            return {"USDT": {"free": 12, "used": 0, "total": 12}}
+
+        def load_time_difference(self):
+            self.syncs += 1
+            self.options["timeDifference"] = 1500
+
+    exchange = FakeExchange()
+    monkeypatch.setattr(bn, "_exchange", lambda _cfg: exchange)
+
+    result = bn.get_account_snapshot(bn.BinanceConfig(profile="live-readonly"))
+
+    assert result["status"] == "ok"
+    assert exchange.reads == 2
+    assert exchange.syncs == 1
+    assert exchange.options["timeDifference"] == 2500
+
+
+def test_binance_clock_retry_does_not_repeat_other_errors() -> None:
+    class FakeExchange:
+        def load_time_difference(self):
+            raise AssertionError("unrelated failures must not resync")
+
+    reads = 0
+
+    def fail():
+        nonlocal reads
+        reads += 1
+        raise RuntimeError('binance {"code":-2015,"msg":"Invalid API-key"}')
+
+    with pytest.raises(RuntimeError, match="Invalid API-key"):
+        bn._read_with_clock_retry(FakeExchange(), fail)
+    assert reads == 1
+
+
+def test_binance_clock_retry_stops_after_second_rejection() -> None:
+    class FakeExchange:
+        def __init__(self):
+            self.options = {"timeDifference": 0}
+            self.syncs = 0
+
+        def load_time_difference(self):
+            self.syncs += 1
+            self.options["timeDifference"] = 1500
+
+    exchange = FakeExchange()
+    reads = 0
+
+    def fail():
+        nonlocal reads
+        reads += 1
+        raise RuntimeError('binance {"code":-1021,"msg":"Timestamp was 1000ms ahead of the server"}')
+
+    with pytest.raises(RuntimeError, match="ahead of the server"):
+        bn._read_with_clock_retry(exchange, fail)
+    assert reads == 2
+    assert exchange.syncs == 1
+
+
+def test_binance_positions_resyncs_simple_earn_read(monkeypatch) -> None:
+    class FakeExchange:
+        def __init__(self):
+            self.options = {"timeDifference": 0}
+            self.earn_reads = 0
+
+        def fetch_balance(self):
+            return {"LDBTC": {"free": 0, "used": 0.9, "total": 0.9}}
+
+        def sapi_get_simple_earn_flexible_position(self, params):
+            assert params == {"size": 100}
+            self.earn_reads += 1
+            if self.earn_reads == 1:
+                raise RuntimeError(
+                    'binance {"code":-1021,"msg":"Timestamp for this request was '
+                    '1000ms ahead of the server\'s time."}'
+                )
+            return {"rows": [{"asset": "BTC", "totalAmount": "1.0"}]}
+
+        def load_time_difference(self):
+            self.options["timeDifference"] = 1600
+
+    exchange = FakeExchange()
+    monkeypatch.setattr(bn, "_exchange", lambda _cfg: exchange)
+
+    result = bn.get_positions(bn.BinanceConfig(profile="live-readonly"))
+
+    assert exchange.earn_reads == 2
+    assert result["positions"] == [
+        {"symbol": "BTC", "quantity": 1.0, "free": 0.0, "used": 1.0, "source": "simple_earn_flexible"}
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # Futu (local OpenD gateway)
 # --------------------------------------------------------------------------- #
@@ -672,6 +849,52 @@ def test_binance_exchange_adjusts_for_server_time(monkeypatch) -> None:
 def test_futu_trd_env_mapping() -> None:
     assert ft.FutuConfig(profile="paper").trd_env_name == "SIMULATE"
     assert ft.FutuConfig(profile="live-readonly").trd_env_name == "REAL"
+
+
+def test_futu_saved_filter_trdmarket_survives_every_profile(monkeypatch, tmp_path) -> None:
+    """A market saved in futu.json must not be overwritten by a profile.
+
+    ``build_config`` applies profile config after the saved file. Hard-coding
+    ``filter_trdmarket`` to HK on every profile therefore forces the HK trade
+    context even for a US-only account. The saved market stays, while the
+    profile still selects the paper/live environment.
+    """
+    from src.trading.connectors.futu.profiles import FUTU_PROFILES
+
+    monkeypatch.setattr(ft, "get_runtime_root", lambda: tmp_path)
+    (tmp_path / "futu.json").write_text(
+        json.dumps({"filter_trdmarket": "US", "profile": "paper"}),
+        encoding="utf-8",
+    )
+
+    assert len(FUTU_PROFILES) == 4
+    for profile in FUTU_PROFILES:
+        cfg = ft.build_config(profile.config, None)
+        assert cfg.filter_trdmarket == "US", profile.id
+        assert cfg.profile == profile.config["profile"]
+
+
+def test_futu_filter_trdmarket_defaults_to_hk(monkeypatch, tmp_path) -> None:
+    """With no saved market, every Futu profile still opens the HK default."""
+    from src.trading.connectors.futu.profiles import FUTU_PROFILES
+
+    monkeypatch.setattr(ft, "get_runtime_root", lambda: tmp_path)
+    for profile in FUTU_PROFILES:
+        cfg = ft.build_config(profile.config, None)
+        assert cfg.filter_trdmarket == "HK", profile.id
+
+
+def test_futu_filter_trdmarket_override_beats_saved_file(monkeypatch, tmp_path) -> None:
+    """An explicit override still wins over the saved market."""
+    from src.trading.connectors.futu.profiles import FUTU_PROFILES
+
+    monkeypatch.setattr(ft, "get_runtime_root", lambda: tmp_path)
+    (tmp_path / "futu.json").write_text(
+        json.dumps({"filter_trdmarket": "US"}),
+        encoding="utf-8",
+    )
+    cfg = ft.build_config(FUTU_PROFILES[0].config, {"filter_trdmarket": "SG"})
+    assert cfg.filter_trdmarket == "SG"
 
 
 def test_futu_classification() -> None:
@@ -875,6 +1098,43 @@ def test_in_broker_paper_place_order_simulated_locally(mod, Config) -> None:
     assert result["paper_guard"] == "simulated_locally"
 
 
+@pytest.mark.parametrize("quantity", [0.5, 1.5, "1.5", "1.00000000000000001"])
+def test_dhan_place_order_rejects_fractional_quantity(quantity) -> None:
+    """A fractional quantity must not silently truncate to a zero-share fill.
+
+    Before the fix, ``int(0.5)`` truncated to 0 after the ``> 0`` check had
+    already passed, so a fractional order came back ``status: ok`` with
+    ``quantity: 0`` — a fabricated successful fill for zero shares.
+    """
+    result = dh.place_order(
+        dh.DhanConfig(profile="paper"), symbol="RELIANCE", side="buy", quantity=quantity
+    )
+    assert result["status"] == "error"
+    assert "whole number" in result["error"]
+
+
+@pytest.mark.parametrize("quantity", [None, 0, -1, "invalid", "", True, [], float("nan"), float("inf"), "-Infinity"])
+def test_dhan_invalid_quantity_returns_an_error(quantity) -> None:
+    result = dh.place_order(
+        dh.DhanConfig(profile="paper"), symbol="RELIANCE", side="buy", quantity=quantity,
+    )
+
+    assert result["status"] == "error"
+    assert "quantity" in result["error"]
+    assert "order_id" not in result
+
+
+@pytest.mark.parametrize("quantity,expected", [(1, 1), (2.0, 2), ("3.0", 3), ("9007199254740993", 9007199254740993)])
+def test_dhan_whole_quantity_is_preserved_in_the_paper_fill(quantity, expected) -> None:
+    result = dh.place_order(
+        dh.DhanConfig(profile="paper"), symbol="RELIANCE", side="buy", quantity=quantity,
+    )
+
+    assert result["status"] == "ok"
+    assert result["quantity"] == expected
+    assert result["paper_guard"] == "simulated_locally"
+
+
 @pytest.mark.parametrize("mod, Config", [(dh, dh.DhanConfig), (sh, sh.ShoonyaConfig)])
 def test_in_broker_paper_cancel_order_simulated(mod, Config) -> None:
     placed = mod.place_order(Config(profile="paper"), symbol="RELIANCE", side="buy", quantity=10)
@@ -946,3 +1206,12 @@ def test_shoonya_service_unconfigured(monkeypatch, tmp_path) -> None:
     assert result["status"] == "error"
     assert result["connector"] == "shoonya"
     assert result["transport"] == "broker_sdk"
+
+
+def test_mt5_instrument_search_refuses_executable_override(monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("must not attach to an overridden executable")
+    monkeypatch.setattr(mt5, "search_instruments", forbidden)
+    result = service.search_instruments("XAUUSD", "mt5-paper-sdk", terminal_path="C:/arbitrary.exe")
+    assert result["status"] == "error"
+    assert result["instruments"] == []

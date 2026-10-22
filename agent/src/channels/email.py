@@ -3,10 +3,12 @@
 import asyncio
 import html
 import imaplib
+from io import BytesIO
+import logging
 import mimetypes
 import re
+import shlex
 import smtplib
-import ssl
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import date
@@ -19,15 +21,19 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Literal
 
-import logging; logger = logging.getLogger(__name__)
+from src.channels.rich_text import render_email_html
+
 from pydantic import Field
 
+from src.channels import email_probe
 from src.channels.bus.events import OutboundMessage
 from src.channels.bus.queue import MessageBus
 from src.channels.base import BaseChannel
 from src.channels.utils import get_media_dir
 from pydantic import BaseModel
-from src.channels.utils import safe_filename
+from src.channels.utils import email_tls_context, safe_filename, send_imap_id
+
+logger = logging.getLogger(__name__)
 
 
 class EmailConfig(BaseModel):
@@ -42,13 +48,21 @@ class EmailConfig(BaseModel):
     imap_password: str = ""
     imap_mailbox: str = "INBOX"
     imap_use_ssl: bool = True
+    # With imap_use_ssl off, upgrade with STARTTLS before LOGIN, as
+    # smtp_use_tls does for SMTP. Off sends the password in plain text.
+    imap_use_tls: bool = True
 
     smtp_host: str = ""
     smtp_port: int = 587
     smtp_username: str = ""
     smtp_password: str = ""
+    # Operator-managed secret used only for explicitly protected PDF reports.
+    pdf_password: str = Field(default="", repr=False)
     smtp_use_tls: bool = True
     smtp_use_ssl: bool = False
+    # Certificate + hostname verification on every TLS path (implicit SSL and
+    # STARTTLS, IMAP and SMTP); False only for self-signed / internal-CA servers.
+    verify_tls: bool = True
     from_address: str = ""
 
     auto_reply_enabled: bool = True
@@ -65,6 +79,16 @@ class EmailConfig(BaseModel):
     # Email authentication verification (anti-spoofing)
     verify_dkim: bool = True   # Require Authentication-Results with dkim=pass
     verify_spf: bool = True    # Require Authentication-Results with spf=pass
+    # authserv-id of the mail server this deployment's own inbox provider
+    # stamps on delivery (the token right after "Authentication-Results:",
+    # e.g. "mx.google.com") -- required to trust any spf=pass/dkim=pass
+    # verdict at all. Without it there is no way to tell that header apart
+    # from one an attacker forged in the message before it ever reached a
+    # real authenticating server, so verification fails closed until it is
+    # set. Find it by looking at the Authentication-Results header on any
+    # genuine email already in the inbox. The receiver must strip untrusted
+    # copies bearing this ID (RFC 8601 section 5); the string is not a signature.
+    trusted_authserv_id: str = ""
 
     # Attachment handling — set allowed types to enable (e.g. ["application/pdf", "image/*"], or ["*"] for all)
     allowed_attachment_types: list[str] = Field(default_factory=list)
@@ -93,6 +117,12 @@ class EmailChannel(BaseChannel):
 
     name = "email"
     display_name = "Email"
+    delivery_target_label = "Recipient email address"
+    delivery_target_kind = "email_address"
+    delivery_target_placeholder = "name@example.com"
+    delivery_target_input_type = "email"
+    supports_connection_test = True
+    hot_reload_noop_keys = frozenset({"allow_from"})
     _IMAP_MONTHS = (
         "Jan",
         "Feb",
@@ -157,6 +187,18 @@ class EmailChannel(BaseChannel):
                 "Emails with spoofed From headers will be accepted. "
                 "Set verify_dkim=true and verify_spf=true for anti-spoofing protection."
             )
+        elif not self.config.trusted_authserv_id:
+            self.logger.warning(
+                "verify_spf/verify_dkim are on but trusted_authserv_id is not "
+                "set, so no Authentication-Results header can be trusted "
+                "(there is no way to tell your provider's real header apart "
+                "from one an attacker forged before the message ever reached "
+                "an authenticating server). Every inbound email will be "
+                "rejected until you set trusted_authserv_id to the "
+                "authserv-id your provider stamps -- copy it from the "
+                "Authentication-Results header on any genuine email already "
+                "in this inbox."
+            )
         self.logger.info("Starting Email channel (IMAP polling mode)...")
 
         poll_seconds = max(5, int(self.config.poll_interval_seconds))
@@ -184,7 +226,7 @@ class EmailChannel(BaseChannel):
                             metadata=item.get("metadata", {}),
                         )
                     except Exception:
-                        self.logger.exception("Error delivering email from {}", sender)
+                        self.logger.exception("Error delivering email from %s", sender)
                         continue
 
                     uid = str((item.get("metadata") or {}).get("uid") or "")
@@ -194,7 +236,12 @@ class EmailChannel(BaseChannel):
                 if should_apply_post_action and not self.config.post_action_ignore_skipped:
                     post_actions_uids.update(skipped_uids)
 
-                if post_actions_uids:
+                # stop() is flag-only: an in-flight to_thread fetch completes and
+                # its already-fetched batch is still delivered above (dropping it
+                # would LOSE messages already marked seen during fetch), but the
+                # destructive delete/move post-actions of a stale config are
+                # skipped once stopped — non-destructive wins.
+                if post_actions_uids and self._running:
                     await asyncio.to_thread(self._apply_post_actions_batch, sorted(post_actions_uids))
             except Exception:
                 self.logger.exception("Polling error")
@@ -207,19 +254,32 @@ class EmailChannel(BaseChannel):
         """Stop polling loop."""
         self._running = False
 
+    async def test_connection(self) -> dict[str, Any]:
+        """Validate the email credentials with a standalone IMAP + SMTP probe.
+
+        Delegates to :func:`src.channels.email_probe.test_connection`; see
+        that function for the full contract (codes, scrubbing, no sending).
+        """
+        return await email_probe.test_connection(self.config)
+
     async def send(self, msg: OutboundMessage) -> None:
-        """Send email via SMTP."""
+        """Send email via SMTP; explicit scheduled sends fail visibly if disabled."""
+        force_send = bool((msg.metadata or {}).get("force_send"))
         if not self.config.consent_granted:
+            if force_send:
+                raise RuntimeError("Email delivery requires consent_granted")
             self.logger.warning("Skip email send: consent_granted is false")
             return
 
         if not self.config.smtp_host:
+            if force_send:
+                raise RuntimeError("Email delivery requires smtp_host")
             self.logger.warning("SMTP host not configured")
             return
 
         # Skip progress messages to prevent sending an empty email after each tool call
         if (msg.metadata or {}).get("_progress"):
-            self.logger.debug("Skip progress message to {}", msg.chat_id)
+            self.logger.debug("Skip progress message to %s", msg.chat_id)
             return
 
         to_addr = msg.chat_id.strip()
@@ -229,11 +289,10 @@ class EmailChannel(BaseChannel):
 
         # Determine if this is a reply (recipient has sent us an email before)
         is_reply = to_addr in self._last_subject_by_chat
-        force_send = bool((msg.metadata or {}).get("force_send"))
 
         # autoReplyEnabled only controls automatic replies, not proactive sends
         if is_reply and not self.config.auto_reply_enabled and not force_send:
-            self.logger.info("Skip automatic reply to {}: auto_reply_enabled is false", to_addr)
+            self.logger.info("Skip automatic reply to %s: auto_reply_enabled is false", to_addr)
             return
 
         base_subject = self._last_subject_by_chat.get(to_addr, "vibe-trading reply")
@@ -252,18 +311,18 @@ class EmailChannel(BaseChannel):
             filename = path.name or "attachment"
             if len(attachments) >= max_attachment_count:
                 failed_attachments.append(f"[attachment: {filename} - too many attachments]")
-                self.logger.warning("Attachment count limit reached, skipping: {}", media_path)
+                self.logger.warning("Attachment count limit reached, skipping: %s", media_path)
                 continue
             if not path.is_file():
                 failed_attachments.append(f"[attachment: {filename} - send failed]")
-                self.logger.warning("Attachment not found, skipping: {}", media_path)
+                self.logger.warning("Attachment not found, skipping: %s", media_path)
                 continue
             try:
                 size = path.stat().st_size
                 if max_attachment_size <= 0 or size > max_attachment_size:
                     failed_attachments.append(f"[attachment: {filename} - too large]")
                     self.logger.warning(
-                        "Attachment too large, skipping: {} ({} > {} bytes)",
+                        "Attachment too large, skipping: %s (%s > %s bytes)",
                         media_path,
                         size,
                         max_attachment_size,
@@ -275,21 +334,51 @@ class EmailChannel(BaseChannel):
                     ctype = "application/octet-stream"
                 maintype, subtype = ctype.split("/", 1)
                 attachments.append((data, maintype, subtype, filename))
-                self.logger.info("Attached file: {}", filename)
+                self.logger.info("Attached file: %s", filename)
             except Exception:
                 failed_attachments.append(f"[attachment: {filename} - send failed]")
-                self.logger.exception("Failed to attach file {}", media_path)
+                self.logger.exception("Failed to attach file %s", media_path)
 
         content = msg.content or ""
         if failed_attachments:
             fallback = "\n".join(failed_attachments)
             content = f"{content.rstrip()}\n\n{fallback}" if content.strip() else fallback
 
+        delivery_format = (msg.metadata or {}).get("delivery_format")
+        if delivery_format not in {"html", "pdf"}:
+            delivery_format = None
+        metadata = msg.metadata or {}
+        protect_pdf = metadata.get("protect_pdf") is True
+        if protect_pdf and delivery_format != "pdf":
+            raise ValueError("PDF protection requires PDF delivery")
+        if protect_pdf and not self.config.pdf_password:
+            raise RuntimeError("PDF protection requested but no PDF password is configured")
+
         email_msg = EmailMessage()
         email_msg["From"] = self.config.from_address or self.config.smtp_username or self.config.imap_username
         email_msg["To"] = to_addr
         email_msg["Subject"] = subject
-        email_msg.set_content(content)
+
+        generated_pdf: bytes | None = None
+        if delivery_format == "pdf":
+            # Keep the report out of the message body when PDF delivery is
+            # requested; a render failure must not silently send it as plain text.
+            notice = "Report attached as PDF."
+            email_msg.set_content(notice)
+            email_msg.add_alternative(render_email_html(notice), subtype="html")
+            try:
+                from src.channels.rich_text import render_email_pdf
+
+                generated_pdf = await asyncio.to_thread(render_email_pdf, content)
+                if protect_pdf:
+                    generated_pdf = await asyncio.to_thread(self._encrypt_pdf, generated_pdf)
+            except Exception:
+                self.logger.exception("Failed to render required PDF attachment")
+                raise
+        else:
+            email_msg.set_content(content)
+            if delivery_format == "html":
+                email_msg.add_alternative(render_email_html(content), subtype="html")
 
         for data, maintype, subtype, filename in attachments:
             email_msg.add_attachment(
@@ -297,6 +386,13 @@ class EmailChannel(BaseChannel):
                 maintype=maintype,
                 subtype=subtype,
                 filename=filename,
+            )
+        if generated_pdf is not None:
+            email_msg.add_attachment(
+                generated_pdf,
+                maintype="application",
+                subtype="pdf",
+                filename="vibe-trading-report.pdf",
             )
 
         in_reply_to = self._last_message_id_by_chat.get(to_addr)
@@ -307,8 +403,28 @@ class EmailChannel(BaseChannel):
         try:
             await asyncio.to_thread(self._smtp_send, email_msg)
         except Exception:
-            self.logger.exception("Error sending to {}", to_addr)
+            self.logger.exception("Error sending to %s", to_addr)
             raise
+
+    def _encrypt_pdf(self, pdf_data: bytes) -> bytes:
+        """Encrypt a generated PDF with the private channel password."""
+        password = self.config.pdf_password
+        if not password:
+            raise RuntimeError("PDF protection requested but no PDF password is configured")
+
+        try:
+            from pypdf import PdfReader, PdfWriter
+
+            reader = PdfReader(BytesIO(pdf_data))
+            writer = PdfWriter()
+            writer.append_pages_from_reader(reader)
+            writer.encrypt(user_password=password, algorithm="AES-256")
+            output = BytesIO()
+            writer.write(output)
+            return output.getvalue()
+        except Exception:
+            # Keep dependency/parser errors from reflecting secret input.
+            raise RuntimeError("PDF protection failed") from None
 
     def _validate_config(self) -> bool:
         missing = []
@@ -329,7 +445,7 @@ class EmailChannel(BaseChannel):
             missing.append("post_action_move_mailbox")
 
         if missing:
-            self.logger.error("Channel not configured, missing: {}", ', '.join(missing))
+            self.logger.error("Channel not configured, missing: %s", ', '.join(missing))
             return False
         return True
 
@@ -340,6 +456,7 @@ class EmailChannel(BaseChannel):
                 self.config.smtp_host,
                 self.config.smtp_port,
                 timeout=timeout,
+                ssl_context=email_tls_context(self.config.verify_tls),
             ) as smtp:
                 smtp.login(self.config.smtp_username, self.config.smtp_password)
                 smtp.send_message(msg)
@@ -347,7 +464,7 @@ class EmailChannel(BaseChannel):
 
         with smtplib.SMTP(self.config.smtp_host, self.config.smtp_port, timeout=timeout) as smtp:
             if self.config.smtp_use_tls:
-                smtp.starttls(context=ssl.create_default_context())
+                smtp.starttls(context=email_tls_context(self.config.verify_tls))
             smtp.login(self.config.smtp_username, self.config.smtp_password)
             smtp.send_message(msg)
 
@@ -413,7 +530,7 @@ class EmailChannel(BaseChannel):
             except Exception as exc:
                 if attempt == 1 or not self._is_stale_imap_error(exc):
                     raise
-                self.logger.warning("IMAP connection went stale, retrying once: {}", exc)
+                self.logger.warning("IMAP connection went stale, retrying once: %s", exc)
 
         return messages, skipped_uids
 
@@ -462,7 +579,7 @@ class EmailChannel(BaseChannel):
                 if not sender:
                     continue
                 if self._is_self_address(sender):
-                    self.logger.info("From {} ignored: matches bot-owned address", sender)
+                    self.logger.info("From %s ignored: matches bot-owned address", sender)
                     self._remember_processed_uid(uid, dedupe, cycle_uids)
                     if mark_seen:
                         client.store(imap_id, "+FLAGS", "\\Seen")
@@ -471,11 +588,13 @@ class EmailChannel(BaseChannel):
                     continue
 
                 # --- Anti-spoofing: verify Authentication-Results ---
-                spf_pass, dkim_pass = self._check_authentication_results(parsed)
+                spf_pass, dkim_pass = self._check_authentication_results(
+                    parsed, self.config.trusted_authserv_id
+                )
                 if self.config.verify_spf and not spf_pass:
                     self.logger.warning(
-                        "From {} rejected: SPF verification failed "
-                        "(no 'spf=pass' in Authentication-Results header)",
+                        "From %s rejected: SPF verification failed (no aligned "
+                        "'spf=pass' in a trusted Authentication-Results header)",
                         sender,
                     )
                     self._remember_processed_uid(uid, dedupe, cycle_uids)
@@ -484,8 +603,8 @@ class EmailChannel(BaseChannel):
                     continue
                 if self.config.verify_dkim and not dkim_pass:
                     self.logger.warning(
-                        "From {} rejected: DKIM verification failed "
-                        "(no 'dkim=pass' in Authentication-Results header)",
+                        "From %s rejected: DKIM verification failed (no aligned "
+                        "'dkim=pass' in a trusted Authentication-Results header)",
                         sender,
                     )
                     self._remember_processed_uid(uid, dedupe, cycle_uids)
@@ -559,23 +678,32 @@ class EmailChannel(BaseChannel):
 
     def _open_imap_client(self, mailbox: str, *, missing_mailbox_ok: bool = False) -> Any | None:
         if self.config.imap_use_ssl:
-            client: Any = imaplib.IMAP4_SSL(self.config.imap_host, self.config.imap_port)
+            client: Any = imaplib.IMAP4_SSL(
+                self.config.imap_host,
+                self.config.imap_port,
+                ssl_context=email_tls_context(self.config.verify_tls),
+            )
         else:
             client = imaplib.IMAP4(self.config.imap_host, self.config.imap_port)
 
         try:
+            if not self.config.imap_use_ssl and self.config.imap_use_tls:
+                client.starttls(ssl_context=email_tls_context(self.config.verify_tls))
             client.login(self.config.imap_username, self.config.imap_password)
+            # NetEase (163/126/yeah.net) rejects SELECT with "Unsafe Login"
+            # unless the client sent an IMAP ID first; harmless elsewhere.
+            send_imap_id(client)
             try:
                 status, _ = client.select(mailbox)
             except Exception as exc:
                 if missing_mailbox_ok and self._is_missing_mailbox_error(exc):
-                    self.logger.warning("Mailbox unavailable, skipping poll for {}: {}", mailbox, exc)
+                    self.logger.warning("Mailbox unavailable, skipping poll for %s: %s", mailbox, exc)
                     self._close_imap_client(client)
                     return None
                 raise
 
             if status != "OK":
-                self.logger.warning("Mailbox select returned {}, skipping poll for {}", status, mailbox)
+                self.logger.warning("Mailbox select returned %s, skipping poll for %s", status, mailbox)
                 self._close_imap_client(client)
                 return None
         except Exception:
@@ -675,12 +803,12 @@ class EmailChannel(BaseChannel):
             if features.move:
                 status, _ = client.uid("MOVE", uid, target)
                 if status != "OK":
-                    self.logger.warning("Post-action move failed (UID MOVE) for UID {} to mailbox {}", uid, target)
+                    self.logger.warning("Post-action move failed (UID MOVE) for UID %s to mailbox %s", uid, target)
                 return
 
             status, _ = client.uid("COPY", uid, target)
             if status != "OK":
-                self.logger.warning("Post-action move failed (UID COPY) for UID {} to mailbox {}", uid, target)
+                self.logger.warning("Post-action move failed (UID COPY) for UID %s to mailbox %s", uid, target)
                 return
             if not self._uid_store_deleted(client, uid, features):
                 return
@@ -725,12 +853,12 @@ class EmailChannel(BaseChannel):
         # unreliable: resolve the current sequence number from UID and use STORE.
         imap_id = self._lookup_imap_id_by_uid(client, uid)
         if not imap_id:
-            self.logger.warning("Post-action skipped: UID {} not found", uid)
+            self.logger.warning("Post-action skipped: UID %s not found", uid)
             return False
 
         status, _ = client.store(imap_id, "+FLAGS", "\\Deleted")
         if status != "OK":
-            self.logger.warning("Post-action failed: could not mark UID {} as deleted", uid)
+            self.logger.warning("Post-action failed: could not mark UID %s as deleted", uid)
             return False
         return True
 
@@ -741,7 +869,7 @@ class EmailChannel(BaseChannel):
             status, _ = client.uid("EXPUNGE", uid)
             if status == "OK":
                 return
-            self.logger.warning("UID EXPUNGE failed for UID {}, falling back to EXPUNGE", uid)
+            self.logger.warning("UID EXPUNGE failed for UID %s, falling back to EXPUNGE", uid)
         if self.config.post_action_expunge:
             client.expunge()
 
@@ -828,20 +956,200 @@ class EmailChannel(BaseChannel):
         return payload.strip()
 
     @staticmethod
-    def _check_authentication_results(parsed_msg: Any) -> tuple[bool, bool]:
-        """Parse Authentication-Results headers for SPF and DKIM verdicts.
+    def _authentication_results_segments(value: str) -> list[str]:
+        """Split clauses outside quoted strings and discard nested RFC comments.
+
+        Malformed quoted strings or comments refuse the whole header.
+        """
+        segments: list[str] = []
+        current: list[str] = []
+        depth = 0
+        quoted = False
+        escaped = False
+        for char in value:
+            if escaped:
+                if not depth:
+                    current.append(char)
+                escaped = False
+            elif char == "\\" and (depth or quoted):
+                if not depth:
+                    current.append(char)
+                escaped = True
+            elif depth:
+                if char == "(":
+                    depth += 1
+                elif char == ")":
+                    depth -= 1
+            elif char == '"':
+                quoted = not quoted
+                current.append(char)
+            elif not quoted and char == "(":
+                depth = 1
+                current.append(" ")
+            elif not quoted and char == ")":
+                return []
+            elif not quoted and char == ";":
+                segments.append("".join(current).strip())
+                current = []
+            else:
+                current.append(char)
+        if depth or quoted or escaped:
+            return []
+        segments.append("".join(current).strip())
+        return segments
+
+    @classmethod
+    def _select_trusted_authentication_results(
+        cls, parsed_msg: Any, trusted_authserv_id: str
+    ) -> str | None:
+        """Select one unambiguous receiver header by configured authserv-id.
+
+        The receiving provider MUST remove forged copies bearing its own ID
+        (RFC 8601 section 5). The ID alone is not cryptographic provenance.
+        Unknown, malformed or duplicate matching headers fail closed.
+
+        Args:
+            parsed_msg: Parsed email message.
+            trusted_authserv_id: ID of the configured stripping receiver.
+
+        Returns:
+            The sole matching header, or None.
+        """
+        wanted = trusted_authserv_id.strip().lower()
+        if not wanted:
+            return None
+        matches: list[str] = []
+        for header in parsed_msg.get_all("Authentication-Results") or []:
+            segments = cls._authentication_results_segments(str(header))
+            if not segments:
+                continue
+            try:
+                identity = shlex.split(segments[0])
+            except ValueError:
+                continue
+            if identity and identity[0].lower() == wanted:
+                if len(identity) > 2 or (len(identity) == 2 and identity[1] != "1"):
+                    return None
+                matches.append(str(header))
+        return matches[0] if len(matches) == 1 else None
+
+    @classmethod
+    def _parse_authentication_results_clauses(
+        cls, header_value: str,
+    ) -> list[dict[str, Any]]:
+        """Read method/result and properties without interpreting quoted prose.
+
+        Comments have already been removed; quoted property values are decoded
+        by the lexer. A malformed clause is never used for authentication.
+        """
+        clauses: list[dict[str, Any]] = []
+        for segment in cls._authentication_results_segments(header_value)[1:]:
+            lexer = shlex.shlex(segment, posix=True, punctuation_chars="=")
+            lexer.whitespace_split = True
+            lexer.commenters = ""
+            try:
+                tokens = list(lexer)
+            except ValueError:
+                continue
+            if len(tokens) < 3 or tokens[1] != "=":
+                continue
+            if not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_-]*(?:/[0-9.]+)?", tokens[0]):
+                continue
+            if not re.fullmatch(r"[a-zA-Z0-9_-]+", tokens[2]):
+                continue
+            properties: dict[tuple[str, str], str] = {}
+            valid = (len(tokens) - 3) % 3 == 0
+            for index in range(3, len(tokens) - 2, 3):
+                key, equals, value = tokens[index:index + 3]
+                if equals != "=":
+                    valid = False
+                    break
+                if key.lower() == "reason":
+                    continue
+                if not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_-]*\.[a-zA-Z][a-zA-Z0-9_-]*", key):
+                    valid = False
+                    break
+                pair = tuple(key.lower().split(".", 1))
+                if pair in properties:
+                    valid = False
+                    break
+                properties[pair] = value
+            if valid:
+                clauses.append({"method": tokens[0].lower().split("/", 1)[0],
+                                "result": tokens[2].lower(), "properties": properties})
+        return clauses
+
+    @staticmethod
+    def _domains_align(candidate: str, from_domain: str) -> bool:
+        """Use strict domain alignment; relaxed alignment belongs to the receiver.
+
+        A suffix alone cannot establish organizational ownership (public
+        suffixes and delegated subdomains exist). A trusted DMARC verdict can
+        supply relaxed alignment without a local public-suffix database.
+        """
+        candidate = candidate.strip().lower().rstrip(".")
+        from_domain = from_domain.strip().lower().rstrip(".")
+        return bool(candidate and from_domain and candidate == from_domain)
+
+    @classmethod
+    def _check_authentication_results(
+        cls, parsed_msg: Any, trusted_authserv_id: str = ""
+    ) -> tuple[bool, bool]:
+        """Parse the trusted Authentication-Results header for SPF/DKIM verdicts.
+
+        A ``pass`` result alone is not enough: it only says the named
+        SPF/DKIM domain is legitimate, not that it is the domain the message
+        claims to be from. An attacker can pass SPF/DKIM for their own
+        domain while spoofing the visible From: header to look like someone
+        else's. Each mechanism therefore also requires either an explicit
+        ``dmarc=pass`` in the same trusted header (DMARC evaluation already
+        performs this alignment check) or the mechanism's own authenticated
+        domain to align with the message's From: domain.
+
+        Args:
+            parsed_msg: Parsed email message.
+            trusted_authserv_id: This deployment's own mail server's
+                authserv-id. Verification fails closed (returns
+                ``(False, False)``) without it -- see
+                :meth:`_select_trusted_authentication_results`.
 
         Returns:
             A tuple of (spf_pass, dkim_pass) booleans.
         """
+        header = cls._select_trusted_authentication_results(
+            parsed_msg, trusted_authserv_id
+        )
+        if header is None:
+            return False, False
+
+        from_headers = parsed_msg.get_all("From") or []
+        if len(from_headers) != 1:
+            return False, False
+        from_address = parseaddr(from_headers[0])[1]
+        if "@" not in from_address:
+            return False, False
+        from_domain = from_address.rsplit("@", 1)[-1]
+        clauses = cls._parse_authentication_results_clauses(header)
+        dmarc_pass = any(
+            c["method"] == "dmarc" and c["result"] == "pass"
+            and cls._domains_align(c["properties"].get(("header", "from"), ""), from_domain)
+            for c in clauses
+        )
+
         spf_pass = False
         dkim_pass = False
-        for ar_header in parsed_msg.get_all("Authentication-Results") or []:
-            ar_lower = ar_header.lower()
-            if re.search(r"\bspf\s*=\s*pass\b", ar_lower):
-                spf_pass = True
-            if re.search(r"\bdkim\s*=\s*pass\b", ar_lower):
-                dkim_pass = True
+        for clause in clauses:
+            if clause["method"] == "spf" and clause["result"] == "pass":
+                candidate = clause["properties"].get(("smtp", "mailfrom")) or clause[
+                    "properties"
+                ].get(("smtp", "helo"), "")
+                candidate_domain = candidate.rsplit("@", 1)[-1] if candidate else ""
+                if dmarc_pass or cls._domains_align(candidate_domain, from_domain):
+                    spf_pass = True
+            elif clause["method"] == "dkim" and clause["result"] == "pass":
+                candidate_domain = clause["properties"].get(("header", "d"), "")
+                if dmarc_pass or cls._domains_align(candidate_domain, from_domain):
+                    dkim_pass = True
         return spf_pass, dkim_pass
 
     @classmethod
@@ -872,7 +1180,7 @@ class EmailChannel(BaseChannel):
 
             content_type = part.get_content_type()
             if not any(fnmatch(content_type, pat) for pat in allowed_types):
-                logger.debug("Attachment skipped (type {}): not in allowed list", content_type)
+                logger.debug("Attachment skipped (type %s): not in allowed list", content_type)
                 continue
 
             payload = part.get_payload(decode=True)
@@ -880,7 +1188,7 @@ class EmailChannel(BaseChannel):
                 continue
             if len(payload) > max_size:
                 logger.warning(
-                    "Attachment skipped: size {} exceeds limit {}",
+                    "Attachment skipped: size %s exceeds limit %s",
                     len(payload),
                     max_size,
                 )
@@ -893,9 +1201,9 @@ class EmailChannel(BaseChannel):
             try:
                 dest.write_bytes(payload)
                 saved.append(dest)
-                logger.info("Attachment saved: {}", dest)
+                logger.info("Attachment saved: %s", dest)
             except Exception as exc:
-                logger.warning("Failed to save attachment {}: {}", dest, exc)
+                logger.warning("Failed to save attachment %s: %s", dest, exc)
 
         return saved
 

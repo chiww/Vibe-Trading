@@ -31,6 +31,8 @@ Example config::
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -126,6 +128,50 @@ def _resample_to_interval(df: pd.DataFrame, interval: str, symbol: str) -> pd.Da
     return resampled
 
 
+def _source_cache_identity(entry: dict[str, Any]) -> str:
+    """Hash reader settings while excluding unrelated YAML annotations."""
+    identity = {
+        key: entry.get(key)
+        for key in ("type", "path", "db_path", "query", "date_format")
+    }
+    columns = entry.get("columns")
+    identity["columns"] = (
+        sorted(
+            (str(key), value)
+            for key, value in columns.items()
+            if isinstance(value, str)
+        )
+        if isinstance(columns, dict)
+        else None
+    )
+    payload = json.dumps(identity, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _source_file_revision(entry: dict[str, Any]) -> str:
+    # A local source can be corrected or replaced without changing its YAML.
+    # Identify filesystem revisions as well as reader declarations so settled
+    # cached bars cannot hide the updated file. DuckDB writes may reside in WAL.
+    source_type = str(entry.get("type") or "csv").strip().lower()
+    source_path = (
+        entry.get("db_path") if source_type == "duckdb" else entry.get("path")
+    )
+    revisions = []
+    if isinstance(source_path, str) and source_path.strip():
+        reader_path = source_path if source_type == "duckdb" else source_path.strip()
+        path = Path(reader_path).expanduser()
+        paths = [path, Path(str(path) + ".wal")] if source_type == "duckdb" else [path]
+        for file in paths:
+            try:
+                stat = file.stat()
+                revisions.append(
+                    (str(file), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+                )
+            except OSError:
+                revisions.append((str(file), None))
+    payload = json.dumps(revisions).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
 def _load_config() -> dict[str, Any] | None:
     if not _CONFIG_PATH.exists():
         return None
@@ -138,6 +184,17 @@ def _normalize_columns(
     col_map: dict[str, str],
     date_fmt: str | None,
 ) -> pd.DataFrame | None:
+    # A DatetimeIndex carries the bar dates (parquet files, and duckdb
+    # relations whose query set one). An explicitly mapped date column wins
+    # over the index; otherwise the index becomes the date column, whatever
+    # date_fmt is configured. Dropping the index on the first path also
+    # sidesteps the reset_index crash when index and column share a name.
+    if isinstance(df.index, pd.DatetimeIndex):
+        if col_map.get("date", "date") in df.columns:
+            df = df.reset_index(drop=True)
+        else:
+            df = df.reset_index()
+            col_map = {**col_map, "date": df.columns[0]}
     rename: dict[str, str] = {}
     for std_name, src_name in col_map.items():
         if std_name == "date":
@@ -191,11 +248,6 @@ def _read_csv(path: str, col_map: dict[str, str], date_fmt: str | None) -> pd.Da
 
 def _read_parquet(path: str, col_map: dict[str, str], date_fmt: str | None) -> pd.DataFrame | None:
     df = pd.read_parquet(path)
-    if isinstance(df.index, pd.DatetimeIndex):
-        df = df.reset_index()
-        if date_fmt is None and col_map.get("date", "date") not in df.columns:
-            col_map = dict(col_map)
-            col_map["date"] = df.columns[0]
     return _normalize_columns(df, col_map, date_fmt)
 
 
@@ -284,8 +336,14 @@ class DataLoader:
                     timeframe=interval,
                     start_date=start_date,
                     end_date=end_date,
-                    fields=None,
-                    fetch=lambda c=clean: self._fetch_one(c, start_date, end_date, interval),
+                    # Local symbols are user-defined: the same name can point
+                    # to another file/query/schema. Keep settled-data caching,
+                    # but key it by reader settings as well as the range.
+                    fields=[_source_cache_identity(entry)],
+                    source_revision=_source_file_revision(entry),
+                    fetch=lambda c=clean: self._fetch_one(
+                        c, start_date, end_date, interval
+                    ),
                 )
                 if df is not None and not df.empty:
                     result[clean] = df
@@ -343,8 +401,10 @@ class DataLoader:
         # Treat ``end_date`` as inclusive of the whole day so intraday bars on
         # the end day survive the filter (a bare midnight bound dropped them,
         # which would defeat any sub-daily ``interval``).
-        end = pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
-        df = df[(df.index >= start) & (df.index <= end)]
+        end = pd.Timestamp(end_date) + pd.Timedelta(days=1)
+        # A half-open boundary includes fractional seconds on the end day
+        # without admitting the following midnight.
+        df = df[(df.index >= start) & (df.index < end)]
         if df.empty:
             return None
         df = _resample_to_interval(df, interval, symbol)

@@ -83,6 +83,75 @@ def test_channel_manager_can_construct_websocket_with_default_gateway() -> None:
     assert manager.channels["websocket"].name == "websocket"
 
 
+def test_should_suppress_outbound_rejects_duplicate_reply_to_same_message() -> None:
+    """A second byte-identical reply carrying the same inbound message_id
+    must be suppressed, matching the log line's documented contract."""
+    bus = MessageBus()
+    manager = ChannelManager(
+        {"websocket": {"enabled": True, "host": "127.0.0.1", "port": 0, "allow_from": ["*"]}},
+        bus,
+    )
+    msg1 = OutboundMessage(
+        channel="telegram",
+        chat_id="123",
+        content="Here is your answer.",
+        metadata={"message_id": "inbound-42"},
+    )
+    msg2 = OutboundMessage(
+        channel="telegram",
+        chat_id="123",
+        content="Here is your answer.",
+        metadata={"message_id": "inbound-42"},
+    )
+
+    assert manager._should_suppress_outbound(msg1) is False
+    assert manager._should_suppress_outbound(msg2) is True
+
+
+def _dedup_manager() -> ChannelManager:
+    return ChannelManager(
+        {"websocket": {"enabled": True, "host": "127.0.0.1", "port": 0, "allow_from": ["*"]}},
+        MessageBus(),
+    )
+
+
+def test_integer_message_ids_dedupe_like_strings() -> None:
+    """Telegram and NapCat carry int message ids; they were never deduped (#1476)."""
+    manager = _dedup_manager()
+    reply = lambda: OutboundMessage(  # noqa: E731
+        channel="telegram", chat_id="123", content="Here is your answer.", metadata={"message_id": 42}
+    )
+
+    assert manager._should_suppress_outbound(reply()) is False
+    assert manager._should_suppress_outbound(reply()) is True
+
+
+def test_a_different_reply_to_the_same_message_is_sent() -> None:
+    manager = _dedup_manager()
+    first = OutboundMessage(channel="telegram", chat_id="1", content="first", metadata={"message_id": "m"})
+    second = OutboundMessage(channel="telegram", chat_id="1", content="second", metadata={"message_id": "m"})
+
+    assert manager._should_suppress_outbound(first) is False
+    assert manager._should_suppress_outbound(second) is False
+
+
+def test_reply_fingerprints_are_bounded(monkeypatch) -> None:
+    import src.channels.manager as manager_module
+
+    monkeypatch.setattr(manager_module, "_MAX_REPLY_FINGERPRINTS", 3)
+    manager = _dedup_manager()
+    for i in range(5):
+        manager._should_suppress_outbound(
+            OutboundMessage(channel="telegram", chat_id="1", content="same", metadata={"message_id": f"m{i}"})
+        )
+
+    assert list(manager._origin_reply_fingerprints) == [
+        ("telegram", "1", "m2"),
+        ("telegram", "1", "m3"),
+        ("telegram", "1", "m4"),
+    ]
+
+
 def test_registry_reports_all_built_in_channels_with_dependency_recovery() -> None:
     expected = {
         "dingtalk",
@@ -133,6 +202,30 @@ def test_registry_ignores_global_channel_settings() -> None:
     assert "reply_timeout_s" not in statuses
     assert "send_max_retries" not in statuses
     assert "model_dump" not in statuses
+
+
+def test_telegram_status_suggests_numeric_authorized_private_chats() -> None:
+    from src.channels.registry import inspect_channel
+
+    if not inspect_channel("telegram").available:
+        pytest.skip("telegram optional dependency not installed")
+
+    manager = ChannelManager(
+        {
+            "telegram": {
+                "enabled": True,
+                "token": "test-token",
+                "allow_from": ["1381234567", "alice", "*", "1381234567|alice", "１２３４５６"],
+            }
+        },
+        MessageBus(),
+    )
+
+    status = manager.get_status()["telegram"]
+
+    assert status["delivery_target_suggestions"] == [
+        {"kind": "private_chat", "target": "1381234567"}
+    ]
 
 
 def test_channel_manager_status_includes_every_configured_adapter() -> None:
@@ -893,3 +986,33 @@ def test_signal_group_command_requires_per_sender_authorization() -> None:
     )
     assert allowed is True
     assert allowed_chat == "group-1"
+
+
+@pytest.mark.parametrize("fmt,label", [("html", "HTML"), ("pdf", "PDF"), (None, "plain text")])
+def test_channel_confirmation_displays_email_format(tmp_path, monkeypatch, fmt, label):
+    from src.scheduled_research import proposals
+
+    monkeypatch.setattr(proposals, "latest_pending_for_session", lambda sid: {
+        "operation": "create", "job": {
+            "title": "Research", "schedule": {"expression": "60000"},
+            "delivery": {"channel": "email", "target_label": "Research", "format": fmt},
+        },
+    })
+
+    async def scenario():
+        from src.channels.runtime import ChannelRuntime
+
+        bus = MessageBus()
+        runtime = ChannelRuntime(bus=bus, session_service=FakeSessionService(), manager=None,
+                                 session_map_path=tmp_path / "sessions.json", reply_timeout_s=1,
+                                 poll_interval_s=0.01)
+        await runtime.start(start_manager=False)
+        try:
+            await bus.publish_inbound(InboundMessage(channel="websocket", sender_id="u", chat_id="c", content="schedule research"))
+            outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=1)
+            assert f"Email format: {label}" in outbound.content
+            assert 'Reply exactly "confirm"' in outbound.content
+        finally:
+            await runtime.stop()
+
+    asyncio.run(scenario())

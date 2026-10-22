@@ -19,6 +19,7 @@ import pandas as pd
 from src.factors.base import (
     decay_linear,
     delta,
+    observed_over,
     rank,
     safe_div,
     scale,
@@ -40,7 +41,7 @@ ALPHA_ID = "gtja191_154"
 __alpha_meta__ = {
     'id': 'gtja191_154',
     'theme': ['volume'],
-    'formula_latex': 'see body',
+    'formula_latex': '(((VWAP - MIN(VWAP,16))) < (CORR(VWAP, MEAN(VOLUME,180),18))) cast to float * -1 (binary indicator)',
     'columns_required': ['open', 'high', 'low', 'close', 'volume', 'amount'],
     'extras_required': [],
     'universe': ['equity_cn'],
@@ -66,4 +67,6 @@ def compute(panel):
     left = vw - ts_min(vw, 16)
     right = ts_corr(vw, ts_mean(v, 180), 18)
     out = (left < right).astype("float64") * -1.0
-    return out
+    # Reach of each input through the nested windows; a gap inside it is not a verdict (#1463).
+    # v: mean 180 + corr 18; vw: corr 18.
+    return out.where(observed_over((v, 197), (vw, 18)))

@@ -108,6 +108,102 @@ def test_refresh_aggregates_three_readonly_connectors(tmp_path):
     assert "quantity" not in context["holdings"][0]
 
 
+def test_unpriced_binance_btc_marks_snapshot_incomplete(tmp_path):
+    settings = _settings_store(tmp_path)
+    settings.save(
+        {
+            "display_currency": "USD",
+            "sources": [{"connection_id": "binance", "label": "Binance", "order": 0}],
+        }
+    )
+
+    def failed_quote(*_args, **_kwargs):
+        raise RuntimeError('binance {"code":-1021,"msg":"Timestamp was ahead of the server"}')
+
+    service = PortfolioService(
+        PortfolioStore(tmp_path / "portfolio.sqlite3"),
+        settings_store=settings,
+        get_account=lambda _profile_id: {"balances": []},
+        get_positions=lambda _profile_id: {
+            "positions": [
+                {"symbol": "BTC", "quantity": 0.08601717, "source": "simple_earn_flexible"}
+            ]
+        },
+        get_quote=failed_quote,
+        fx_fetcher=lambda: (
+            Decimal("7.2"),
+            Decimal("7.8"),
+            "2026-09-17T00:00:00+08:00",
+        ),
+    )
+
+    snapshot = service.refresh()
+
+    assert snapshot["complete"] is False
+    assert snapshot["accounts"][0]["status"] == "ok"
+    assert snapshot["positions"][0]["symbol"] == "BTC"
+    assert snapshot["positions"][0]["priced"] is False
+    assert snapshot["totals"]["usd"] == 0.0
+    assert any("holdings are excluded" in warning and "binance:BTC" in warning for warning in snapshot["warnings"])
+    assert service.history() == []
+
+    # Older versions stored this exact shape with complete=true. Do not use
+    # such a row as a valid history point after upgrading.
+    service.store.save_snapshot(
+        {**snapshot, "snapshot_id": "old-mislabeled-row", "complete": True}
+    )
+    assert service.history() == []
+    assert service.store.latest(complete_only=True) is None
+
+
+def test_unpriced_ibkr_position_keeps_reported_account_total_complete(tmp_path):
+    settings = _settings_store(tmp_path)
+    settings.save(
+        {
+            "display_currency": "USD",
+            "sources": [{"connection_id": "ibkr", "label": "IBKR", "order": 0}],
+        }
+    )
+
+    service = PortfolioService(
+        PortfolioStore(tmp_path / "portfolio.sqlite3"),
+        settings_store=settings,
+        get_account=lambda _profile_id: {
+            "summary": [
+                {"tag": "NetLiquidation", "value": "1000", "currency": "USD"}
+            ]
+        },
+        get_positions=lambda _profile_id: {
+            "positions": [
+                {
+                    "symbol": "AAPL",
+                    "sec_type": "STK",
+                    "exchange": "SMART",
+                    "currency": "USD",
+                    "position": 2,
+                    "avg_cost": 100,
+                }
+            ]
+        },
+        get_quote=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("quote unavailable")
+        ),
+        fx_fetcher=lambda: (
+            Decimal("7.2"),
+            Decimal("7.8"),
+            "2026-09-17T00:00:00+08:00",
+        ),
+    )
+
+    snapshot = service.refresh()
+
+    assert snapshot["complete"] is True
+    assert snapshot["totals"]["usd"] == 1000.0
+    assert snapshot["positions"][0]["priced"] is False
+    assert len(service.history()) == 1
+    assert service.store.latest(complete_only=True) is not None
+
+
 def test_latest_enriches_legacy_snapshot_with_current_compatibility(tmp_path):
     store = PortfolioStore(tmp_path / "portfolio.sqlite3")
     settings = _settings_store(tmp_path)
@@ -186,6 +282,66 @@ def test_a_positions_read_without_a_positions_list_is_an_error_not_an_empty_sour
     }
     ibkr = next(row for row in snapshot["accounts"] if row["broker"] == "ibkr")
     assert "must contain a list" in ibkr["error"]
+
+
+def test_unrated_balance_currency_fails_only_that_source(tmp_path):
+    """A missing FX rate must not discard healthy sources in the same refresh."""
+
+    def get_account(profile_id):
+        if profile_id.startswith("ibkr"):
+            return {
+                "summary": [
+                    {
+                        "tag": "NetLiquidation",
+                        "value": "1000",
+                        "currency": "USD",
+                    }
+                ]
+            }
+        if profile_id.startswith("longbridge"):
+            return {
+                "balances": [
+                    {
+                        "net_assets": "5000",
+                        "total_cash": "1000",
+                        "currency": "SGD",
+                    }
+                ]
+            }
+        return {"balances": []}
+
+    service = PortfolioService(
+        PortfolioStore(tmp_path / "portfolio.sqlite3"),
+        settings_store=_settings_store(tmp_path),
+        get_account=get_account,
+        get_positions=lambda profile_id: {"positions": []},
+        get_quote=lambda *args, **kwargs: {},
+        fx_fetcher=lambda: (
+            Decimal("7.2"),
+            Decimal("7.8"),
+            "2026-08-09T00:00:00+00:00",
+        ),
+    )
+
+    snapshot = service.refresh()
+
+    assert snapshot["complete"] is False
+    ibkr = next(row for row in snapshot["accounts"] if row["broker"] == "ibkr")
+    longbridge = next(
+        row for row in snapshot["accounts"] if row["broker"] == "longbridge"
+    )
+    assert ibkr["status"] == "ok"
+    assert ibkr["total_usd"] == 1000.0
+    assert longbridge["status"] == "error"
+    assert longbridge["total_usd"] is None
+    assert "SGD" in longbridge["error"]
+    assert snapshot["totals"]["usd"] == 1000.0
+
+
+def test_display_currency_without_production_rate_is_rejected_on_save(tmp_path):
+    store = PortfolioSettingsStore(tmp_path / "portfolio.json")
+    with pytest.raises(ValueError, match="KRW.*no production FX rate"):
+        store.save({"display_currency": "KRW", "sources": []})
 
 
 def test_failed_source_is_excluded_from_totals_and_reports_its_last_success(tmp_path):
@@ -681,3 +837,101 @@ def test_reconnect_contains_callback_server_system_exit(monkeypatch, tmp_path):
 
     with pytest.raises(RuntimeError, match="stopped safely"):
         _reconnect_service(tmp_path).reconnect_source("ibkr")
+
+
+def _pinned_service(tmp_path, nav):
+    accounts = {
+        "ibkr-live-local-readonly": {"summary": [{"tag": "NetLiquidation", "value": nav, "currency": "USD"}]},
+        "longbridge-live-sdk-readonly": {"balances": []},
+        "binance-live-sdk-readonly": {"balances": []},
+    }
+    positions = {
+        "ibkr-live-local-readonly": {
+            "positions": [
+                {"symbol": "AAPL", "sec_type": "STK", "exchange": "SMART", "currency": "USD", "position": 2, "avg_cost": 100}
+            ]
+        },
+        "longbridge-live-sdk-readonly": {"positions": []},
+        "binance-live-sdk-readonly": {"positions": []},
+    }
+    return PortfolioService(
+        PortfolioStore(tmp_path / "portfolio.sqlite3"),
+        settings_store=_settings_store(tmp_path),
+        get_account=lambda profile_id: accounts[profile_id],
+        get_positions=lambda profile_id: positions[profile_id],
+        get_quote=lambda symbol, profile_id, **kwargs: {"quote": {"last": 150}},
+        fx_fetcher=lambda: (Decimal("7.2"), Decimal("7.8"), "2026-08-09T00:00:00+00:00"),
+    ), accounts
+
+
+def test_analysis_context_can_be_pinned_to_a_stored_snapshot(tmp_path):
+    """A later refresh must not move a read that names its snapshot."""
+    service, accounts = _pinned_service(tmp_path, "300")
+    first = service.refresh()
+    accounts["ibkr-live-local-readonly"]["summary"][0]["value"] = "450"
+    second = service.refresh()
+    assert second["snapshot_id"] != first["snapshot_id"]
+
+    latest = service.analysis_context()
+    pinned = service.analysis_context(snapshot_id=first["snapshot_id"])
+
+    assert latest["snapshot_id"] == second["snapshot_id"]
+    assert latest["read_identity"]["mode"] == "latest"
+    assert pinned["snapshot_id"] == first["snapshot_id"]
+    assert pinned["read_identity"] == {
+        "mode": "pinned",
+        "snapshot_id": first["snapshot_id"],
+        "as_of": first["created_at"],
+        "valuation_version": first["valuation_version"],
+    }
+    assert pinned["totals"] == first["totals"]
+    assert pinned["totals"] != latest["totals"]
+    assert service.analysis_context(snapshot_id="missing") is None
+    assert service.analysis_context(snapshot_id="") is None
+
+
+def test_a_pinned_read_hides_a_snapshot_that_includes_a_disabled_source(tmp_path):
+    service, _ = _pinned_service(tmp_path, "300")
+    snapshot = service.refresh()
+    assert service.analysis_context(snapshot_id=snapshot["snapshot_id"]) is not None
+
+    settings = service.settings_store.load()
+    service.settings_store.save(
+        {
+            "display_currency": "USD",
+            "sources": [
+                {
+                    "connection_id": source.connection_id,
+                    "label": source.label,
+                    "order": index,
+                    "enabled": source.id != "ibkr",
+                }
+                for index, source in enumerate(settings.sources)
+            ],
+        }
+    )
+
+    assert service.analysis_context(snapshot_id=snapshot["snapshot_id"]) is None
+
+
+@pytest.mark.parametrize("old_version", [1, 3])
+def test_a_pinned_read_refuses_a_snapshot_valued_under_another_contract(tmp_path, old_version):
+    service, _ = _pinned_service(tmp_path, "300")
+    snapshot = service.refresh()
+    service.store.save_snapshot({**snapshot, "snapshot_id": "old-contract", "valuation_version": old_version})
+
+    assert service.analysis_context(snapshot_id="old-contract") is None
+
+
+@pytest.mark.parametrize("rate,expected", [("8", "800"), ("7.5", "750.0"), (None, None), ("NaN", None), (0, None)])
+def test_history_uses_the_saved_hkd_rate(tmp_path, rate, expected):
+    store = PortfolioStore(tmp_path / "history.sqlite3")
+    store.save_snapshot({
+        "snapshot_id": "snapshot", "created_at": "2026-10-13T00:00:00Z",
+        "complete": True, "totals": {"usd": 100, "cny": 700},
+        "fx": {"usd_hkd": rate},
+    })
+    point = store.history()[0]
+    assert point["total_hkd"] == expected
+    assert point["total_usd"] == "100"
+    assert point["total_cny"] == "700"

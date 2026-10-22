@@ -1,22 +1,59 @@
 {
   "app": {
-    "version": "v0.1.15"
+    "version": "v0.1.18"
   },
   "charts": {
     "noPriceData": "Noch keine Kursdaten für dieses Symbol",
     "noCorrelationData": "Wählen Sie mindestens zwei Symbole zum Vergleichen",
+    "correlationUndefined": "undefiniert (keine Preisbewegung im Zeitraum)",
     "noEquityData": "Noch keine Kontowert-Kurve — führen Sie zuerst einen Backtest durch"
+  },
+  "navigation": {
+    "menu": "Funktionen entdecken",
+    "close": "Funktionsmenü schließen",
+    "groups": {
+      "research": "Tägliche Recherche",
+      "analysis": "Spezialisierte Analyse",
+      "automation": "Automatisierung & Einrichtung"
+    },
+    "howTo": "So verwendest du {{feature}}",
+    "startResearch": "Mit dem Rechercheassistenten starten",
+    "descriptions": {
+      "agent": "Stelle eine Recherchefrage oder beschreibe eine Strategie in eigenen Worten.",
+      "reports": "Abgeschlossene Backtests ansehen und vergleichen.",
+      "portfolio": "Guthaben und Positionen verbundener Konten zusammen ansehen.",
+      "alphaZoo": "Aktienauswahlsignale erkunden und historische Ergebnisse bewerten oder vergleichen.",
+      "optionsLab": "Optionsstrategien erstellen, Gewinn und Risiko untersuchen und US-Optionsketten ansehen.",
+      "correlation": "Vergleichen, wie sich Vermögenswerte gemeinsam bewegen.",
+      "scheduled": "Eine Recherche nach Zeitplan wiederholen.",
+      "runtime": "Brokerverbindungen und den Betriebsstatus des Handels prüfen.",
+      "settings": "Modelle, Datenquellen und Brokerverbindungen konfigurieren.",
+      "pixelOffice": "Plane und verteile Rechercheaufgaben. Eine Zuweisung startet keine Ausführung. Ränge sind Bezeichnungen und erteilen keine Handelsrechte.",
+      "paperTrading": "Tägliche Trades mit virtuellem Kapital testen. Es werden keine Brokeraufträge gesendet. Bardividenden sind nicht enthalten; die Ergebnisse zeigen keine Gesamtrendite."
+    },
+    "instructions": {
+      "reports": "Bitte den Assistenten zuerst um einen Strategie-Backtest und öffne hier die Ergebnisse. Im Chat erstellte PDFs und andere Dokumente lädst du in der ursprünglichen Unterhaltung herunter.",
+      "portfolio": "Füge eine Kontoquelle hinzu, aktiviere sie und aktualisiere die Positionen. Diese Seite zeigt Kontodaten schreibgeschützt an.",
+      "alphaZoo": "Lies die Faktordefinition und wähle Markt und Zeitraum, um Signale zu bewerten oder zu vergleichen. Prüfe Kandidaten mit einem Backtest.",
+      "optionsLab": "Wähle eine Vorlage oder füge Optionslegs hinzu und passe Preis, Laufzeit und Volatilität an; Ergebnisse werden automatisch aktualisiert. Das Symbol der echten Optionskette ist von der Simulation getrennt.",
+      "correlation": "Gib mindestens zwei Wertpapiercodes ein, wähle den Zeitraum und klicke auf Berechnen.",
+      "scheduled": "Gib einen Rechercheauftrag ein, wähle die Häufigkeit und speichere. Für die Ausführung muss der lokale Planer aktiviert sein; zur Zustellung ist ein eingerichteter Kanal nötig.",
+      "runtime": "Richte zuerst unter Einstellungen oder Portfolio eine Brokerverbindung ein. Verfügbare Handelsaktionen hängen von den Brokerfunktionen und deiner Autorisierung ab.",
+      "settings": "Richte zunächst ein Modell ein. Ergänze Datenquellen oder Brokerverbindungen nach Bedarf; für öffentliche Marktrecherche ist kein Brokerkonto nötig.",
+      "pixelOffice": "Plane und verteile Rechercheaufgaben. Eine Zuweisung startet keine Ausführung. Ränge sind Bezeichnungen und erteilen keine Handelsrechte.",
+      "paperTrading": "Nur abgeschlossene Tageskerzen werden abgerechnet. Strategien sehen vorherige Tage und handeln zum Schlusskurs des Ausführungstags. Bitte 30 Minuten nach regulärem Börsenschluss warten; es wird keine automatische Ausführung geplant."
+    }
   },
   "layout": {
     "home": "Startseite",
-    "agent": "Agent",
-    "runtime": "Runtime",
-    "scheduled": "Geplant",
-    "reports": "Berichte",
-    "alphaZoo": "Alpha Zoo",
+    "agent": "Rechercheassistent",
+    "runtime": "Handelsstatus",
+    "scheduled": "Geplante Recherche",
+    "reports": "Backtest-Berichte",
+    "alphaZoo": "Faktorrecherche",
     "settings": "Einstellungen",
-    "correlation": "Korrelationsmatrix",
-    "optionsLab": "Options-Labor",
+    "correlation": "Korrelation der Anlagen",
+    "optionsLab": "Optionsanalyse",
     "sessions": "Sitzungen",
     "newChat": "Neuer Chat",
     "noSessions": "Noch keine Chats — drücken Sie +, um einen zu starten",
@@ -33,13 +70,16 @@
     "sidebar": "Vibe-Trading-Seitenleiste",
     "mainNavigation": "Hauptnavigation",
     "about": "Über",
-    "portfolio": "Portfolio"
+    "portfolio": "Kontopositionen",
+    "sessionsLoadFailed": "Gespräche können nicht geladen werden.",
+    "pixelOffice": "Pixelbüro",
+    "paperTrading": "Simulierter Handel"
   },
   "runtime": {
     "monitorBadge": "Runtime-Monitor",
     "title": "Live-/Paper-Runtime-Status",
-    "subtitlePre": "Schreibgeschützter Status von",
-    "subtitlePost": ". Diese Seite autorisiert keine Konnektoren, startet oder stoppt keine Runner, übermittelt oder storniert keine Orders und ändert keine Mandate.",
+    "subtitlePre": "Prüfen Sie den Verbindungsstatus, Handelsmandate und die Aktivität des Runners.",
+    "subtitlePost": " Bei gestopptem Runner können Sie die Häufigkeit der Modellentscheidungen und Ausgabenlimits ändern.",
     "refresh": "Aktualisieren",
     "unavailableTitle": "Runtime-Status nicht verfügbar",
     "unavailableHint": "Behandeln Sie die Connector-Runtime als nicht verfügbar, bis das Backend einen aktuellen Status-Snapshot liefert.",
@@ -79,7 +119,7 @@
     "riskHalted": "Risiko gestoppt",
     "riskHaltedDesc": "Die Notabschaltung ist für dieses Profil ausgelöst. Behandeln Sie die Connector-Runtime als gestoppt, bis der Status sich klärt.",
     "riskActive": "Runtime aktiv",
-    "riskActiveDesc": "Der Runner läuft und ein nicht abgelaufenes Mandat ist vorhanden. Diese Seite bleibt rein schreibgeschützt.",
+    "riskActiveDesc": "Der Runner läuft und sein Handelsmandat ist noch gültig.",
     "riskIdle": "Bereit, aber inaktiv",
     "riskIdleDesc": "Autorisierung und Mandat sind vorhanden, aber der Runner läuft nicht.",
     "riskDormant": "Inaktiv",
@@ -148,6 +188,23 @@
     "advancedHint": "Ein 5-Feld-Cron-Ausdruck, ausgewertet in der gewählten Zeitzone (Minute Stunde Tag Monat Wochentag; Listen und Bereiche erlaubt), oder ein reines Intervall in Millisekunden.",
     "timezoneLabel": "Zeitzone",
     "create": "Lauf planen",
+    "saveChanges": "Änderungen speichern",
+    "cancelEdit": "Bearbeitung abbrechen",
+    "editingHint": "Dieser geplante Lauf wird bearbeitet. Beim Speichern bleiben Identität und Ausführungsverlauf erhalten.",
+    "edit": "Bearbeiten",
+    "editAria": "Geplanten Lauf bearbeiten: {{prompt}}",
+    "editRunningDisabled": "Warte, bis der Lauf oder die Zustellung abgeschlossen ist.",
+    "deliveryInApp": "Nur in Vibe behalten (nicht senden)",
+    "deliveryNoChannels": "Es sind keine aktivierten Zustellungskanäle konfiguriert. Konfigurieren Sie einen unter Einstellungen → Kanäle.",
+    "deliveryChannelsLoadFailed": "Konfigurierte Zustellungskanäle konnten nicht geladen werden.",
+    "deliveryChannelUnavailable": "{{channel}} (derzeit nicht verfügbar)",
+    "deliveryTargetKind_destination": "Ziel",
+    "deliveryTargetKind_email_address": "E-Mail-Adresse des Empfängers",
+    "deliveryTargetKind_chat": "Chat",
+    "deliveryTargetKind_channel": "Kanal",
+    "deliveryTargetDisabled": "Wählen Sie zuerst einen Zustellungskanal.",
+    "deliverySummary": "{{channel}} → {{target}}",
+    "deliveryUnknownTarget": "Konfiguriertes Ziel",
     "promptRequired": "Geben Sie einen Recherche-Prompt ein, bevor Sie planen.",
     "invalidTime": "Geben Sie eine gültige Zeit als HH:MM ein.",
     "executorHint": "Läufe werden nur ausgeführt, wenn der Server mit aktiviertem VIBE_TRADING_ENABLE_SCHEDULER gestartet wurde.",
@@ -190,6 +247,16 @@
     "deliveryChannelPlaceholder": "telegram, feishu … (leer lassen, dann bleibt alles in der App)",
     "deliveryTargetLabel": "Ziel im Kanal",
     "deliveryTargetPlaceholder": "Chat- / Gruppen- / Benutzer-ID",
+    "deliveryFormatLabel": "E-Mail-Berichtsformat",
+    "deliveryFormatDefault": "Kanalstandard (reiner Text)",
+    "deliveryFormatHtml": "HTML-E-Mail",
+    "deliveryFormatPdf": "PDF-Anhang",
+    "proposalPdfProtection": "PDF-Passwortschutz",
+    "proposalPdfProtectionOn": "Ein",
+    "proposalPdfProtectionOff": "Aus",
+    "deliveryFormatDefaultHint": "Behält die bisherige Zustellung als reinen Text bei.",
+    "deliveryFormatHtmlHint": "Zeigt den vollständigen Bericht als bereinigtes HTML im Nachrichtentext.",
+    "deliveryFormatPdfHint": "Hängt den vollständigen Bericht als PDF an und lässt im Nachrichtentext nur einen kurzen Hinweis.",
     "deliveryHint": "Standardmäßig aus. Das Briefing wird **nach dem Lauf** gesendet, nicht bei der Planung.",
     "deliveryTargetRequired": "Geben Sie ein Ziel für diesen Kanal an, oder leeren Sie das Kanalfeld.",
     "delivery_none": "Wird nach dem nächsten Lauf an {{channel}} gesendet",
@@ -202,7 +269,18 @@
     "verdictUnreadable": "Letztes Urteil nicht lesbar",
     "verdictNoCalls": "Keine Calls",
     "verdictDelta": "{{was}} → {{now}}",
-    "verdictRecorded": "Stand {{when}}"
+    "verdictRecorded": "Stand {{when}}",
+    "deliveryKnownTargetLabel": "Bekanntes Ziel",
+    "deliveryKnownTargetPlaceholder": "Bekanntes Ziel auswählen…",
+    "deliverySuggestionKind_private_chat": "Privater Chat",
+    "deliveryTargetPlaceholder_email_address": "name@example.com",
+    "deliveryTargetPlaceholder_chat": "Chat-, Gruppen- oder Benutzer-ID",
+    "deliveryTargetPlaceholder_channel": "Kanal-ID",
+    "deliveryTargetPlaceholder_destination": "Chat- / Gruppen- / Benutzer-ID",
+    "deliveryTargetPlaceholder_slack_destination": "#Kanal, @Benutzer oder Konversations-ID",
+    "deliveryTargetKind_slack_destination": "Ziel",
+    "deliveryProtectPdf": "PDF mit Passwort schützen",
+    "deliveryProtectPdfUnavailable": "Es ist kein PDF-Passwort eingerichtet. Lege eines unter Einstellungen > Kanäle > E-Mail fest, um den Schutz zu aktivieren."
   },
   "reports": {
     "badge": "Berichte",
@@ -222,7 +300,7 @@
     "unavailable": "Berichtsbibliothek nicht verfügbar",
     "loadError": "Berichte konnten nicht geladen werden.",
     "emptyTitle": "Noch keine Berichte",
-    "emptyBody": "Erstellen Sie einen Backtest im Agent-Bereich, dann kehren Sie hierher zurück, um ihn zu prüfen.",
+    "emptyBody": "Bitte den Rechercheassistenten um einen Backtest und sieh dir hier die Ergebnisse an.",
     "noMatchesTitle": "Keine passenden Berichte",
     "noMatchesBody": "Passen Sie Ihre Suchanfrage, den Statusfilter oder den Datumsbereich an.",
     "noPrompt": "Kein Prompt erfasst.",
@@ -236,9 +314,22 @@
   "connection": {
     "reconnecting": "Verbindung wird wiederhergestellt …",
     "disconnected": "Verbindung verloren. Laden Sie die Seite neu, um wieder zu verbinden.",
-    "reload": "Neu laden"
+    "reload": "Neu laden",
+    "retry": "Verbindung erneut versuchen",
+    "requestFailed": "Der API-Server ist nicht erreichbar. Prüfe, ob er läuft und eine Netzwerkverbindung besteht.",
+    "requestTimeout": "Die Anfrage hat das Zeitlimit überschritten. Prüfe die Serververbindung und versuche es erneut.",
+    "requestTimeoutMutation": "Die Anfrage hat das Zeitlimit überschritten. Der Server verarbeitet sie möglicherweise noch; prüfe den aktuellen Status, bevor du es erneut versuchst."
   },
   "welcome": {
+    "tasks": {
+      "research": "Eine Aktie recherchieren",
+      "backtest": "Eine Strategie prüfen",
+      "portfolio": "Meine Positionen prüfen",
+      "hint": "Beispiele füllen das Nachrichtenfeld. Passe Symbol oder Strategie vor dem Senden an.",
+      "researchPrompt": "Recherchiere AAPL mit aktuell verfügbaren Daten: Fasse Geschäft, jüngste Finanzentwicklung und wesentliche Risiken zusammen. Nenne Quellen und Daten und kennzeichne fehlende Informationen.",
+      "backtestPrompt": "Teste eine 20/60-Tage-Durchschnittsstrategie für AAPL im vergangenen Jahr historisch. Vergleiche Renditen und Drawdowns mit Kaufen und Halten und berücksichtige Handelskosten. Nur Recherche.",
+      "portfolioPrompt": "Fasse Positionen, Konzentration und Portfoliorisiken meiner verbundenen Konten zusammen. Erkläre zuerst die Einrichtung, falls kein Konto verbunden ist. Keine Orders aufgeben oder ändern."
+    },
     "categories": {
       "multiMarketBacktest": "A-Share Backtest",
       "researchAnalysis": "Recherche & Analyse",
@@ -312,7 +403,10 @@
       "shadowDeltaPrompt": "Führe einen Shadow-Backtest für die letzten 90 Tage durch und zerlege, wo mein PnL vom Shadow abweicht (Regelverletzungen, vorzeitige Exits, verpasste Signale)",
       "shadowReport": "Shadow-Bericht erstellen",
       "shadowReportDesc": "Ein teilbarer 8-teiliger Bericht: deine Kontokurve, risikobereinigte Rendite und woher jeder Gewinn kam",
-      "shadowReportPrompt": "Rendere den Shadow-Bericht und gib mir die URL — beginne mit dem Du-vs-Shadow-Delta"
+      "shadowReportPrompt": "Rendere den Shadow-Bericht und gib mir die URL — beginne mit dem Du-vs-Shadow-Delta",
+      "adaptStrategy": "Registrierte Strategie anpassen",
+      "adaptStrategyDesc": "Signal beibehalten, neues Universum testen",
+      "adaptStrategyPrompt": "Hilf mir, eine registrierte Strategie auf ein neues Universum und einen neuen Zeitraum anzupassen. Liste zuerst Strategien auf und prüfe die Evidenz der Ausgangsstrategie. Frage nach fehlender ID, Instrumenten, Daten und Positionsgrößen. Behalte das Signal bei, generiere den abgeleiteten Code, führe den Backtest aus und berichte nur dessen eigene aktualisierte Evidenz."
     },
     "taskSubtitle": "Frag nach einer Aktie, einer Strategie oder deinem Portfolio — ich hole die Daten, rechne alles durch und zeige jeden Schritt.",
     "quickActions": "Schnellaktionen",
@@ -359,8 +453,10 @@
     "reasoningEffortLow": "Niedrig",
     "reasoningEffortMedium": "Mittel",
     "reasoningEffortHigh": "Hoch",
+    "reasoningEffortXhigh": "Sehr hoch",
     "reasoningEffortMax": "Maximal",
     "reasoningEffortDesc": "Steuert die Reasoning-Tiefe bei unterstützten Modellen. Höhere Stufen können die komplexe Analyse verbessern, dauern aber länger; nicht unterstützte Anbieter ignorieren diese Einstellung möglicherweise. Keine (explizit) sendet das Feld mit deaktiviertem Reasoning — einige OpenAI-Modelle benötigen dies, um Tools zu verwenden.",
+    "reasoningEffortReset": "Das gewählte Modell unterstützt {{level}} nicht; auf den Anbieter-Standard zurückgesetzt.",
     "useDefaultModel": "Standardmodell verwenden",
     "useDefaultUrl": "Standard-URL verwenden",
     "dataSourcesDesc": "Konfigurieren Sie externe Datenquellen für die Backtesting-Engine.",
@@ -421,7 +517,532 @@
       "stoppedToast": "IM-Kanäle gestoppt",
       "refreshFailed": "IM-Kanäle konnten nicht aktualisiert werden",
       "startFailed": "IM-Kanäle konnten nicht gestartet werden",
-      "stopFailed": "IM-Kanäle konnten nicht gestoppt werden"
+      "stopFailed": "IM-Kanäle konnten nicht gestoppt werden",
+      "config": {
+        "toggleConfig": "{{name}} konfigurieren",
+        "keepCurrent": "Aktuellen Wert behalten ({{masked}})",
+        "secretNotSet": "Nicht gesetzt",
+        "clearSecret": "Löschen",
+        "required": "Erforderlich",
+        "listPlaceholder": "Wert eingeben und mit Enter hinzufügen",
+        "removeValue": "{{value}} entfernen",
+        "save": "Konfiguration speichern",
+        "hotApply": "Speichern wirkt sofort – kein Neustart nötig.",
+        "saved": "Kanal-Konfiguration gespeichert",
+        "appliedInPlace": "Einstellungen ohne erneuten Verbindungsaufbau gespeichert.",
+        "appliedReset": "Einstellungen gespeichert. Die Kanalverbindungen wurden neu gestartet.",
+        "appliedOnStart": "Einstellungen gespeichert. Die Änderungen werden beim Start der Kanäle angewendet.",
+        "appliedReconnect": "Einstellungen gespeichert. Dieser Kanal wurde erneut verbunden.",
+        "saveFailed": "Kanal-Konfiguration konnte nicht gespeichert werden: {{message}}",
+        "test": "Verbindung testen",
+        "testing": "Wird getestet…",
+        "testOk": "Verbindung bestätigt",
+        "testFailed": "Verbindungstest fehlgeschlagen: {{message}}",
+        "testCodeOk": "Der Anbieter hat diese Zugangsdaten akzeptiert.",
+        "testCodeInvalidCredentials": "Der Anbieter hat diese Zugangsdaten abgelehnt.",
+        "testCodeNetwork": "Der Anbieter war nicht erreichbar.",
+        "testCodeUnsupported": "Dieser Kanal unterstützt keine Verbindungstests.",
+        "testedSavedConfig": "Getestet wurde die gespeicherte Konfiguration.",
+        "testedDraftConfig": "Getestet wurden die aktuellen Formularwerte (noch nicht gespeichert).",
+        "enable": "Kanal aktivieren",
+        "enableHint": "Deaktivieren behält die gespeicherten Zugangsdaten – jederzeit wieder aktivierbar.",
+        "enabledToast": "Kanal aktiviert",
+        "disabledToast": "Kanal deaktiviert",
+        "enableFailed": "Kanal konnte nicht aktiviert werden: {{message}}",
+        "disableFailed": "Kanal konnte nicht deaktiviert werden: {{message}}",
+        "enableRejected": "Der Anbieter hat diese Zugangsdaten abgelehnt, daher wurde der Kanal nicht aktiviert.",
+        "enableRejectedDetail": "Antwort des Anbieters: {{detail}}",
+        "enableAnyway": "Trotzdem aktivieren",
+        "enableAnywayHint": "Trotzdem aktivieren überspringt die Prüfung der Zugangsdaten – der Kanal kann möglicherweise keine Verbindung herstellen.",
+        "notWritable": "Die Kanal-Konfiguration liegt in einer YAML-Datei ({{path}}), die die Web-Oberfläche nicht bearbeiten kann. Bearbeite die Datei direkt, um Zugangsdaten zu ändern.",
+        "notWritableChip": "Nur lesbar (YAML)",
+        "sdkMissing": "Laufzeit-SDK nicht installiert – {{hint}}",
+        "sdkMissingNoHint": "Laufzeit-SDK nicht installiert; der Kanal lässt sich konfigurieren, startet aber möglicherweise nicht.",
+        "noFields": "Dieser Kanal hat keine konfigurierbaren Felder.",
+        "loadFailed": "Kanal-Konfiguration konnte nicht geladen werden."
+      },
+      "fields": {
+        "dingtalk": {
+          "client_id": {
+            "label": "Client ID (AppKey)",
+            "help": "Der AppKey der App von der Seite „Zugangsdaten“ der DingTalk-Entwicklerkonsole."
+          },
+          "client_secret": {
+            "label": "Client Secret (AppSecret)",
+            "help": "Das AppSecret der App. Wird serverseitig gespeichert und nie an den Browser zurückgegeben."
+          },
+          "allow_from": {
+            "label": "Erlaubte Absender",
+            "help": "Optionale Positivliste von DingTalk-Absender-IDs, die mit dem Agenten sprechen dürfen („*“ erlaubt alle). Nicht gekoppelte Absender erhalten einen Kopplungscode per Direktnachricht."
+          },
+          "allow_remote_media_redirects": {
+            "label": "Medien-Weiterleitungen erlauben",
+            "help": "Beim Herunterladen von Nachrichtenmedien den Weiterleitungen des Anbieters folgen. Standardmäßig aus."
+          },
+          "remote_media_redirect_allowed_hosts": {
+            "label": "Erlaubte Redirect-Hosts",
+            "help": "Hosts, die bei aktivierten Medien-Weiterleitungen erlaubt sind. Eine leere Liste blockiert alle hostübergreifenden Weiterleitungen."
+          },
+          "group_user_isolation": {
+            "label": "Sitzungen pro Gruppenmitglied",
+            "help": "Jedem Gruppenmitglied eine eigene Agent-Sitzung geben statt einer gemeinsamen."
+          },
+          "force_ipv4": {
+            "label": "IPv4 erzwingen",
+            "help": "Bindet DingTalk-API-Aufrufe an IPv4. Nützlich, wenn die Ausgangs-IP-Whitelist eine stabile IPv4-Adresse enthält, sich das IPv6-Präfix aber ständig ändert."
+          }
+        },
+        "qq": {
+          "app_id": {
+            "label": "AppID",
+            "help": "Die AppID des Bots aus den App-Einstellungen der QQ Open Platform (q.qq.com)."
+          },
+          "secret": {
+            "label": "AppSecret",
+            "help": "Das AppSecret des Bots. Wird serverseitig gespeichert und nie an den Browser zurückgegeben."
+          },
+          "allow_from": {
+            "label": "Erlaubte Absender",
+            "help": "Optionale Positivliste von QQ-Absender-openids, die mit dem Agenten sprechen dürfen („*“ erlaubt alle). Nicht gekoppelte Absender erhalten einen Kopplungscode per Direktnachricht."
+          },
+          "msg_format": {
+            "label": "Nachrichtenformat",
+            "help": "Antwortformat: plain oder markdown."
+          },
+          "ack_message": {
+            "label": "Bestätigungsnachricht",
+            "help": "Sofortige Bestätigung beim Eingang einer Nachricht. Leer lassen, um sie zu deaktivieren."
+          },
+          "media_dir": {
+            "label": "Medienverzeichnis",
+            "help": "Ablageort für eingehende Anhänge. Leer verwendet ~/.vibe-trading/media/qq."
+          },
+          "download_chunk_size": {
+            "label": "Download-Blockgröße",
+            "help": "Bytes pro Block beim Herunterladen von Anhängen (Standard 262144)."
+          },
+          "download_max_bytes": {
+            "label": "Maximale Downloadgröße (Bytes)",
+            "help": "Sicherheitsobergrenze für einen einzelnen Anhang-Download (Standard 209715200 = 200 MB)."
+          }
+        },
+        "email": {
+          "consent_granted": {
+            "label": "Einwilligung erteilt",
+            "help": "Hauptschalter: Der Kanal liest und versendet E-Mails erst, nachdem du hier ausdrücklich eingewilligt hast."
+          },
+          "imap_host": {
+            "label": "IMAP-Host",
+            "help": "Server für eingehende E-Mails, z. B. imap.gmail.com. Neue Nachrichten werden per IMAP von diesem Server abgerufen."
+          },
+          "imap_port": {
+            "label": "IMAP-Port",
+            "help": "Port für eingehende E-Mails (Standard 993 mit SSL)."
+          },
+          "imap_username": {
+            "label": "IMAP-Benutzername",
+            "help": "Postfachkonto für die IMAP-Anmeldung, meist die vollständige E-Mail-Adresse."
+          },
+          "imap_password": {
+            "label": "IMAP-Passwort",
+            "help": "Postfach- oder App-Passwort für IMAP. Wird serverseitig gespeichert und nie an den Browser zurückgegeben."
+          },
+          "imap_mailbox": {
+            "label": "IMAP-Postfach",
+            "help": "Ordner, der auf neue E-Mails geprüft wird (Standard INBOX)."
+          },
+          "imap_use_ssl": {
+            "label": "IMAP-SSL",
+            "help": "IMAP über SSL verbinden (standardmäßig aktiv; erforderlich für Port 993)."
+          },
+          "imap_use_tls": {
+            "label": "IMAP-STARTTLS",
+            "help": "Ist IMAP-SSL aus, die Verbindung vor der Anmeldung per STARTTLS verschlüsseln (standardmäßig aktiv; üblich für Port 143). Nur für einen Server ohne TLS in einem vertrauenswürdigen Netz abschalten – das Passwort wird dann im Klartext gesendet."
+          },
+          "smtp_host": {
+            "label": "SMTP-Host",
+            "help": "Server für ausgehende E-Mails, z. B. smtp.gmail.com. Antworten werden über diesen Server versendet."
+          },
+          "smtp_port": {
+            "label": "SMTP-Port",
+            "help": "Port für ausgehende E-Mails (Standard 587 mit STARTTLS; 465 für implizites SSL)."
+          },
+          "smtp_username": {
+            "label": "SMTP-Benutzername",
+            "help": "Konto für die SMTP-Authentifizierung, meist die vollständige E-Mail-Adresse."
+          },
+          "smtp_password": {
+            "label": "SMTP-Passwort",
+            "help": "Passwort oder App-Passwort für SMTP. Wird serverseitig gespeichert und nie an den Browser zurückgegeben."
+          },
+          "smtp_use_tls": {
+            "label": "SMTP-STARTTLS",
+            "help": "SMTP-Verbindung per STARTTLS verschlüsseln (standardmäßig aktiv; üblich für Port 587). In der Praxis nicht mit SMTP-SSL kombinierbar."
+          },
+          "smtp_use_ssl": {
+            "label": "SMTP-SSL",
+            "help": "SMTP über implizites TLS verbinden, z. B. Port 465 (standardmäßig aus). In der Praxis nicht mit STARTTLS kombinierbar."
+          },
+          "verify_tls": {
+            "label": "TLS-Zertifikat prüfen",
+            "help": "TLS-Zertifikat und Hostname des Mailservers prüfen (empfohlen). Nur für selbstsignierte oder interne CA-Server deaktivieren."
+          },
+          "from_address": {
+            "label": "Absenderadresse",
+            "help": "Adresse, von der Antworten versendet werden. Leer übernimmt den SMTP-Benutzernamen."
+          },
+          "auto_reply_enabled": {
+            "label": "Automatische Antworten",
+            "help": "Auf eingehende E-Mails automatisch antworten. Vom Agenten gestartete Sendungen sind nicht betroffen."
+          },
+          "poll_interval_seconds": {
+            "label": "Abrufintervall (s)",
+            "help": "Wie oft das IMAP-Postfach auf neue E-Mails geprüft wird (Standard 30, Minimum 5)."
+          },
+          "mark_seen": {
+            "label": "Als gelesen markieren",
+            "help": "Verarbeitete E-Mails im Postfach als gelesen markieren."
+          },
+          "post_action": {
+            "label": "Aktion nach Verarbeitung",
+            "help": "Behandlung verarbeiteter E-Mails: delete (löschen), move (in einen anderen Ordner verschieben) oder leer lassen zum Behalten."
+          },
+          "post_action_move_mailbox": {
+            "label": "Verschieben nach Ordner",
+            "help": "Zielordner, wenn die Aktion nach Verarbeitung move ist."
+          },
+          "post_action_expunge": {
+            "label": "Nach Löschen endgültig entfernen",
+            "help": "Gelöschte E-Mails endgültig entfernen (expunge), statt sie nur zu markieren."
+          },
+          "post_action_ignore_skipped": {
+            "label": "Eigene und gefilterte Mail ausnehmen",
+            "help": "Übersprungene E-Mails (eigene Nachrichten und durch die Liste gefilterte Absender) von der Aktion ausnehmen (standardmäßig aktiv)."
+          },
+          "max_body_chars": {
+            "label": "Max. Zeichen im Text",
+            "help": "Text jeder E-Mail auf diese Zeichenzahl kürzen (Standard 12000)."
+          },
+          "subject_prefix": {
+            "label": "Betreff-Präfix",
+            "help": "Präfix für Antwort-Betreffzeilen (Standard \"Re: \")."
+          },
+          "allow_from": {
+            "label": "Erlaubte Absender",
+            "help": "Optionale Positivliste von E-Mail-Adressen, die mit dem Agenten sprechen dürfen (\"*\" erlaubt alle). Nicht gekoppelte Absender erhalten einen Kopplungscode als Antwort."
+          },
+          "verify_dkim": {
+            "label": "DKIM prüfen",
+            "help": "Authentication-Results-Header mit dkim=pass verlangen. Werden DKIM und SPF zugleich deaktiviert, werden gefälschte From-Header akzeptiert."
+          },
+          "verify_spf": {
+            "label": "SPF prüfen",
+            "help": "Authentication-Results-Header mit spf=pass verlangen. Werden DKIM und SPF zugleich deaktiviert, werden gefälschte From-Header akzeptiert."
+          },
+          "allowed_attachment_types": {
+            "label": "Erlaubte Anhangstypen",
+            "help": "MIME-Positivliste für eingehende Anhänge, z. B. application/pdf oder image/*. Leer lassen deaktiviert Anhänge."
+          },
+          "max_attachment_size": {
+            "label": "Max. Anhangsgröße (Bytes)",
+            "help": "Größter zulässiger Einzelanhang in Bytes (Standard 2000000 = 2 MB)."
+          },
+          "max_attachments_per_email": {
+            "label": "Max. Anhänge pro E-Mail",
+            "help": "Wie viele Anhänge aus einer E-Mail übernommen werden (Standard 5)."
+          },
+          "trusted_authserv_id": {
+            "label": "Vertrauenswürdiger Authentifizierungsserver",
+            "help": "authserv-id des empfangenden Servers, z. B. mx.google.com. Der Mailanbieter muss gefälschte eingehende Authentication-Results-Header mit dieser ID entfernen. Bei SPF- oder DKIM-Prüfung erforderlich; leer wird eingehende Mail abgewiesen."
+          },
+          "pdf_password": {
+            "label": "Passwort für PDF-Berichte",
+            "help": "Optionales Passwort für geplante PDF-Berichte, deren Schutz ausdrücklich aktiviert wurde. Es wird auf dem Server gespeichert und weder in geplante Aufgaben aufgenommen noch an den Browser zurückgegeben."
+          }
+        },
+        "websocket": {
+          "host": {
+            "label": "Bind-Adresse",
+            "help": "Lokale Adresse, an die sich der WebSocket-Server bindet (Standard 127.0.0.1, nur lokal). Eine Wildcard-Adresse wie 0.0.0.0 oder :: legt den Server auf allen Schnittstellen offen und wird abgelehnt, solange kein Token oder Ausgabegeheimnis gesetzt ist."
+          },
+          "port": {
+            "label": "Bind-Port",
+            "help": "Lokaler Port des WebSocket-Servers (Standard 8765). Wird ignoriert, wenn ein Unix-Socket-Pfad gesetzt ist."
+          },
+          "unix_socket_path": {
+            "label": "Unix-Socket-Pfad",
+            "help": "Optionaler absoluter Pfad. Ist er gesetzt, lauscht der Server an diesem Unix-Socket statt an Adresse und Port."
+          },
+          "path": {
+            "label": "Upgrade-Pfad",
+            "help": "WebSocket-Upgrade-Pfad für Clients (Standard /). Muss mit \"/\" beginnen."
+          },
+          "token": {
+            "label": "Statisches Token",
+            "help": "Gemeinsames Geheimnis, das beim Handshake über den Parameter token geprüft wird. Wird serverseitig gespeichert und nie an den Browser zurückgegeben."
+          },
+          "token_issue_path": {
+            "label": "Token-Ausgabepfad",
+            "help": "HTTP-GET-Route, die kurzlebige Einmal-Token als JSON ausgibt. Muss sich vom Upgrade-Pfad unterscheiden."
+          },
+          "token_issue_secret": {
+            "label": "Ausgabegeheimnis",
+            "help": "Bearer-Geheimnis, das die Ausgaberoute verlangt (Authorization: Bearer oder X-Vibe-Trading-Auth). Wird serverseitig gespeichert und nie an den Browser zurückgegeben."
+          },
+          "token_ttl_s": {
+            "label": "TTL ausgegebener Token (s)",
+            "help": "Lebensdauer eines von der Ausgaberoute ausgestellten Tokens in Sekunden (30-86400, Standard 300)."
+          },
+          "websocket_requires_token": {
+            "label": "Token verlangen",
+            "help": "Handshakes ohne gültiges statisches oder ausgegebenes Token abweisen (standardmäßig aktiv)."
+          },
+          "allow_from": {
+            "label": "Erlaubte Clients",
+            "help": "Optionale Positivliste von Client-IDs, die sich verbinden dürfen (\"*\" erlaubt alle, Standard)."
+          },
+          "streaming": {
+            "label": "Ausgabe streamen",
+            "help": "Modell-Ausgabedeltas an verbundene Clients senden, sobald sie entstehen."
+          },
+          "max_message_bytes": {
+            "label": "Max. Nachrichtengröße (Bytes)",
+            "help": "Größter zulässiger eingehender Frame in Bytes (Standard 37748736; 1024-41943040)."
+          },
+          "ping_interval_s": {
+            "label": "Ping-Intervall (s)",
+            "help": "Sekunden zwischen Keepalive-Pings (5-300, Standard 20)."
+          },
+          "ping_timeout_s": {
+            "label": "Ping-Timeout (s)",
+            "help": "Sekunden Wartezeit auf eine Ping-Antwort, bevor die Verbindung getrennt wird (5-300, Standard 20)."
+          },
+          "ssl_certfile": {
+            "label": "TLS-Zertifikatspfad",
+            "help": "PEM-Zertifikatspfad auf dem Server für WSS. Zertifikat und Schlüssel gemeinsam setzen oder beide leer lassen; es sind Dateipfade auf dem Server, kein hochgeladenes Material."
+          },
+          "ssl_keyfile": {
+            "label": "TLS-Schlüsselpfad",
+            "help": "PEM-Schlüsselpfad auf dem Server für WSS. Zertifikat und Schlüssel gemeinsam setzen oder beide leer lassen; es sind Dateipfade auf dem Server, kein hochgeladenes Material."
+          }
+        },
+        "feishu": {
+          "app_id": {
+            "label": "App ID",
+            "help": "Die App ID der Anwendung aus der Feishu-/Lark-Entwicklerkonsole (beginnt mit cli_)."
+          },
+          "app_secret": {
+            "label": "App Secret",
+            "help": "Das App Secret der Anwendung. Wird serverseitig gespeichert und nie an den Browser zurückgegeben."
+          },
+          "encrypt_key": {
+            "label": "Encrypt Key",
+            "help": "Der Encrypt Key aus den Einstellungen zum Ereignisabo; im Long-Connection-Modus optional."
+          },
+          "verification_token": {
+            "label": "Verification Token",
+            "help": "Der Verification Token aus den Einstellungen zum Ereignisabo; im Long-Connection-Modus optional."
+          },
+          "allow_from": {
+            "label": "Erlaubte Absender",
+            "help": "Optionale Allowlist von Feishu-Absender-IDs, die mit dem Agenten sprechen dürfen; leer bedeutet alle, die der Bot sehen kann."
+          },
+          "react_emoji": {
+            "label": "Arbeits-Emoji",
+            "help": "Emoji-Reaktion auf eingehende Nachrichten, während der Agent arbeitet (Standard: THUMBSUP)."
+          },
+          "done_emoji": {
+            "label": "Fertig-Emoji",
+            "help": "Emoji-Reaktion nach Abschluss der Aufgabe; leer bedeutet keine."
+          },
+          "tool_hint_prefix": {
+            "label": "Präfix für Tool-Hinweise",
+            "help": "Präfix vor den inline angezeigten Tool-Hinweisen in der Antwort."
+          },
+          "group_policy": {
+            "label": "Gruppenrichtlinie",
+            "help": "\"mention\" antwortet nur bei @-Erwähnung in Gruppen, \"open\" antwortet auf alle Gruppennachrichten."
+          },
+          "reply_to_message": {
+            "label": "Originalnachricht zitieren",
+            "help": "Als Antwort die Originalnachricht zitieren."
+          },
+          "streaming": {
+            "label": "Streaming-Antworten",
+            "help": "Antwort per Live-Bearbeitung der CardKit-Karte streamen."
+          },
+          "domain": {
+            "label": "Domain",
+            "help": "\"feishu\" für Feishu China (open.feishu.cn), \"lark\" für das internationale Lark (open.larksuite.com)."
+          },
+          "topic_isolation": {
+            "label": "Sitzungen pro Thread",
+            "help": "Jedem Gruppen-Thread eine eigene Agent-Sitzung geben, statt einer gemeinsamen pro Gruppe."
+          }
+        },
+        "slack": {
+          "bot_token": {
+            "label": "Bot-Token (xoxb-)",
+            "help": "Das Slack-Bot-User-OAuth-Token (beginnt mit xoxb-). Wird serverseitig gespeichert und nie an den Browser zurückgegeben."
+          },
+          "app_token": {
+            "label": "App-Token (xapp-)",
+            "help": "Das Slack-App-Level-Token (beginnt mit xapp-) mit dem connections:write-Scope, erforderlich für den Socket-Modus. Wird serverseitig gespeichert und nie an den Browser zurückgegeben."
+          },
+          "user_token_read_only": {
+            "label": "User-Token schreibgeschützt",
+            "help": "Verhaltensschalter, keine Zugangsdaten: hält den Zugriff per User-Token schreibgeschützt."
+          },
+          "reply_in_thread": {
+            "label": "Im Thread antworten",
+            "help": "In einem Thread unter der Originalnachricht antworten, statt direkt in den Channel zu schreiben."
+          },
+          "react_emoji": {
+            "label": "Arbeits-Emoji",
+            "help": "Emoji, mit dem auf eine eingehende Nachricht reagiert wird, während der Agent arbeitet (Standard: eyes)."
+          },
+          "done_emoji": {
+            "label": "Fertig-Emoji",
+            "help": "Emoji, mit dem reagiert wird, wenn die Aufgabe abgeschlossen ist (Standard: white_check_mark). Leer lassen für keins."
+          },
+          "include_thread_context": {
+            "label": "Thread-Kontext einbeziehen",
+            "help": "Frühere Antworten aus dem Thread als Kontext voranstellen, wenn der Bot zum ersten Mal in den Thread geholt wird."
+          },
+          "thread_context_limit": {
+            "label": "Thread-Kontextlimit",
+            "help": "Maximale Anzahl von Thread-Nachrichten, die als Kontext einbezogen werden (Standard: 20)."
+          },
+          "allow_from": {
+            "label": "Erlaubte Absender",
+            "help": "Allowlist von Slack-User-IDs, die mit dem Agenten sprechen dürfen. Der Zugriff auf DMs und Channels wird zusätzlich durch die DM-Richtlinie und die Gruppenrichtlinie gesteuert."
+          },
+          "group_policy": {
+            "label": "Gruppenrichtlinie",
+            "help": "\"mention\" antwortet nur bei @-Erwähnung in einem Channel, \"open\" antwortet auf alle Channel-Nachrichten, \"allowlist\" antwortet nur in den unten aufgeführten Channels."
+          },
+          "group_allow_from": {
+            "label": "Erlaubte Channels",
+            "help": "Channel-IDs, in denen der Bot antwortet, wenn die Gruppenrichtlinie \"allowlist\" ist."
+          },
+          "group_require_mention": {
+            "label": "Erwähnung in erlaubten Channels erforderlich",
+            "help": "Mit der Richtlinie \"allowlist\" zusätzlich eine @-Erwähnung verlangen, bevor in zugelassenen Channels geantwortet wird. Ohne Wirkung für \"mention\" oder \"open\"."
+          }
+        },
+        "discord": {
+          "token": {
+            "label": "Bot-Token",
+            "help": "Das Bot-Token aus dem Discord Developer Portal — kein User- oder OAuth-Token. Wird serverseitig gespeichert und nie an den Browser zurückgegeben."
+          },
+          "allow_from": {
+            "label": "Erlaubte Absender",
+            "help": "Allowlist von Discord-User-IDs, die mit dem Agenten sprechen dürfen. Leer lassen, um alle zuzulassen."
+          },
+          "allow_channels": {
+            "label": "Erlaubte Channels",
+            "help": "Allowlist von Discord-Channel-IDs, in denen der Bot antwortet. Leer lassen, um alle Channels zuzulassen."
+          },
+          "intents": {
+            "label": "Gateway-Intents",
+            "help": "Gateway-Intent-Bitfeld als Ganzzahl (Standard 37377 = GUILDS | GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT). MESSAGE CONTENT ist ein privilegiertes Intent, das im Developer Portal aktiviert werden muss, sonst kann sich der Bot nicht verbinden."
+          },
+          "group_policy": {
+            "label": "Gruppenrichtlinie",
+            "help": "\"mention\" antwortet nur bei @-Erwähnung in einem Server-Channel, \"open\" antwortet auf alle Channel-Nachrichten (weiterhin gemäß den Allowlists)."
+          },
+          "read_receipt_emoji": {
+            "label": "Lesebestätigungs-Emoji",
+            "help": "Emoji, mit dem eine eingehende Nachricht sofort quittiert wird (Standard: 👀); wird nach der Antwort entfernt."
+          },
+          "working_emoji": {
+            "label": "Arbeits-Emoji",
+            "help": "Emoji, mit dem reagiert wird, während der Agent noch arbeitet (Standard: 🔧); erscheint nach der Arbeits-Emoji-Verzögerung."
+          },
+          "working_emoji_delay": {
+            "label": "Arbeits-Emoji-Verzögerung (s)",
+            "help": "Sekunden, bevor das Arbeits-Emoji hinzugefügt wird, damit schnelle Antworten es nie zeigen (Standard: 2.0)."
+          },
+          "streaming": {
+            "label": "Streaming-Antworten",
+            "help": "Die Antwort streamen, indem eine Discord-Nachricht fortlaufend bearbeitet wird, statt sie am Ende als eine Nachricht zu senden."
+          },
+          "proxy": {
+            "label": "Proxy-URL",
+            "help": "Optionaler HTTP-Proxy für die Gateway-Verbindung und API-Aufrufe, z. B. http://host:port."
+          },
+          "proxy_username": {
+            "label": "Proxy-Benutzername",
+            "help": "Benutzername für den Proxy; zusammen mit dem Proxy-Passwort oder gar nicht angeben — ein halb angegebenes Paar wird mit einer Warnung ignoriert. Wird serverseitig gespeichert und nie an den Browser zurückgegeben."
+          },
+          "proxy_password": {
+            "label": "Proxy-Passwort",
+            "help": "Passwort für den Proxy; zusammen mit dem Proxy-Benutzernamen oder gar nicht angeben — ein halb angegebenes Paar wird mit einer Warnung ignoriert. Wird serverseitig gespeichert und nie an den Browser zurückgegeben."
+          }
+        }
+      },
+      "guides": {
+        "dingtalk": {
+          "title": "DingTalk-Einrichtungsanleitung",
+          "intro": "DingTalk-Bots nutzen den Stream-Modus, daher ist keine öffentliche Callback-URL nötig.",
+          "step1": "Erstelle eine App in der DingTalk-Entwicklerkonsole (open-dev.dingtalk.com).",
+          "step2": "Füge der App die Bot-Funktion hinzu und aktiviere den Stream-Modus.",
+          "step3": "Kopiere den AppKey der App in Client ID und das AppSecret in Client Secret.",
+          "step4": "Veröffentliche die App, damit sie in deiner Organisation verfügbar ist.",
+          "step5": "Kehre hierher zurück, klicke auf „Verbindung testen“ und aktiviere den Kanal.",
+          "docsLabel": "DingTalk-Entwicklerkonsole öffnen"
+        },
+        "qq": {
+          "title": "QQ-Einrichtungsanleitung",
+          "intro": "QQ-Bots verbinden sich über das offizielle botpy-SDK per WebSocket, daher ist keine öffentliche Callback-URL nötig.",
+          "step1": "Registriere dich auf der QQ Open Platform (q.qq.com) und erstelle einen Bot.",
+          "step2": "Kopiere AppID und AppSecret von der Entwicklungsseite des Bots.",
+          "step3": "Füge sie oben in die Felder AppID und AppSecret ein.",
+          "step4": "Füge den Bot gemäß den Sandbox-/Veröffentlichungsregeln der Plattform einer QQ-Gruppe hinzu oder chatte privat mit ihm.",
+          "step5": "Kehre hierher zurück, klicke auf „Verbindung testen“ und aktiviere den Kanal.",
+          "docsLabel": "QQ Open Platform öffnen"
+        },
+        "email": {
+          "title": "E-Mail-Einrichtungsanleitung",
+          "intro": "Der E-Mail-Kanal ruft eingehende Mail per IMAP ab und antwortet über SMTP – eine öffentliche Callback-URL ist nicht nötig.",
+          "step1": "Ermittle Hostnamen und Ports für IMAP und SMTP bei deinem Anbieter (meist imap.<Anbieter> auf 993 und smtp.<Anbieter> auf 587).",
+          "step2": "Aktiviere IMAP und SMTP in den Postfach-Einstellungen und erstelle – falls der Anbieter es verlangt (Gmail, QQ Mail und andere mit 2FA) – ein App-Passwort.",
+          "step3": "Trage die IMAP- und SMTP-Zugangsdaten oben ein, setze die Absenderadresse und nimm deine eigene Adresse in „Erlaubte Absender“ auf.",
+          "step4": "Klicke auf „Verbindung testen“ – geprüft werden IMAP-Anmeldung, Postfachordner und SMTP-Anmeldung.",
+          "step5": "Setze „Einwilligung erteilt“ und aktiviere den Kanal; automatische Antworten erreichen dann Absender, die die DKIM-/SPF-Prüfung bestehen.",
+          "docsLabel": "Vibe-Trading-Dokumentation öffnen"
+        },
+        "websocket": {
+          "title": "WebSocket-Einrichtungsanleitung",
+          "intro": "Der WebSocket-Kanal betreibt einen eigenen lokalen Server, mit dem sich Clients direkt über eine WebSocket-URL verbinden – eine öffentliche Callback-URL ist nicht nötig.",
+          "step1": "Wähle eine Bind-Adresse: Für rein lokalen Betrieb 127.0.0.1 beibehalten, zum Offenlegen 0.0.0.0 oder :: setzen – eine Wildcard-Adresse erfordert ein Token oder ein Ausgabegeheimnis.",
+          "step2": "Setze ein statisches Token oder einen Token-Ausgabepfad samt Bearer-Geheimnis, damit Clients kurzlebige Token anfordern können.",
+          "step3": "Verbinde Clients mit ws://host:port/path?client_id=...&token=...",
+          "step4": "Speichern im laufenden Betrieb tauscht den Server live aus: Verbundene Clients (einschließlich dieses Web-UI-Chats) verlieren kurz die Verbindung und verbinden sich neu.",
+          "step5": "Klicke auf „Verbindung testen“ – Zertifikat/Schlüssel für SSL und die Verfügbarkeit der Adresse werden lokal geprüft.",
+          "docsLabel": "Vibe-Trading-Dokumentation öffnen"
+        },
+        "feishu": {
+          "title": "Feishu-/Lark-Bot einrichten",
+          "intro": "Feishu-Bots nutzen die WebSocket-Long-Connection; eine öffentliche IP oder ein Webhook ist nicht nötig.",
+          "step1": "Erstelle eine benutzerdefinierte App in der Feishu Open Platform (open.feishu.cn) — oder per QR-Scan im Terminal mit vibe-trading channels login feishu; App ID und App Secret werden dabei automatisch gespeichert.",
+          "step2": "Füge der App die Bot-Funktion hinzu.",
+          "step3": "Abonniere im Ereignisabo »Nachrichten empfangen im.message.receive_v1« und wähle den Long-Connection-Modus.",
+          "step4": "Kopiere App ID und App Secret aus „Anmeldedaten & Basisinformationen“ und füge sie oben ein.",
+          "step5": "Erstelle eine Version und veröffentliche die App (je nach Tenant mit Admin-Freigabe), dann aktiviere den Kanal hier — er wird ohne Neustart heiß übernommen. Für internationale Lark-Tenants die Domain auf lark setzen.",
+          "docsLabel": "Feishu Open Platform öffnen"
+        },
+        "discord": {
+          "title": "Discord-Einrichtungsanleitung",
+          "intro": "Discord-Bots verbinden sich mit einem Bot-Token über das Gateway; eine öffentliche IP oder Webhook-URL ist nicht nötig.",
+          "step1": "Erstelle eine Anwendung im Discord Developer Portal (discord.com/developers).",
+          "step2": "Öffne die Bot-Seite, setze das Token zurück und kopiere es.",
+          "step3": "Aktiviere unter Privileged Gateway Intents die MESSAGE CONTENT INTENT — die Standard-Intents benötigen sie.",
+          "step4": "Erzeuge eine OAuth2-Einlade-URL mit dem bot-Scope (und applications.commands) und füge den Bot zu deinem Server hinzu.",
+          "step5": "Füge das Token hier ein, klicke auf „Verbindung testen“ und aktiviere dann den Kanal.",
+          "docsLabel": "Discord-Entwicklerdokumentation öffnen"
+        }
+      }
     },
     "generation": "Generierung",
     "dataSourceSettings": "Datenquellen-Einstellungen",
@@ -440,7 +1061,7 @@
       "noMarkets": "Keine Marktdatenquellen registriert.",
       "howItWorksTitle": "So funktioniert es",
       "howItWorks": "Bei automatisch erkannten Symbolen werden die Quellen von oben nach unten versucht; eine fehlgeschlagene Quelle fällt zur nächsten durch. Beim Speichern sofort wirksam — kein Neustart nötig.",
-      "caliberCaveat": "Hinweis: Die Quellen unterscheiden sich in der Adjustierungsbasis — z. B. liefert Yahoo unadjustierte OHLC-Kurse, während Tencent/Eastmoney/Tushare adjustierte Kurse liefern — das Umordnen der Kette kann daher Backtest-Zahlen verändern.",
+      "caliberCaveat": "Die Kursbereinigung kann je nach Quelle abweichen. Prüfe die Angaben zu Bereinigung und Herkunft sowie die Warnungen im Laufbericht; eine andere Reihenfolge kann die Backtest-Ergebnisse verändern.",
       "markets": {
         "a_share": "China-Aktien (A)",
         "us_equity": "US-Aktien",
@@ -449,6 +1070,10 @@
         "kr_equity": "Korea-Aktien",
         "ca_equity": "Kanada-Aktien",
         "vietnam_equity": "Vietnam-Aktien",
+        "ar_equity": "Argentinien-Aktien",
+        "br_equity": "Brasilien-Aktien",
+        "uk_equity": "UK-Aktien",
+        "index": "Indizes",
         "crypto": "Krypto",
         "futures": "Futures",
         "fund": "Fonds",
@@ -457,7 +1082,9 @@
       }
     },
     "tushareToken": "Tushare-Token",
+    "gildataToken": "Gildata-Token",
     "clearTushareToken": "Gespeicherten Tushare-Token löschen",
+    "clearGildataToken": "Gespeicherten Gildata-Token löschen",
     "saveDataSourceSettings": "Datenquellen-Einstellungen speichern",
     "baostock": "BaoStock",
     "loadLlmSettingsFailed": "LLM-Einstellungen konnten nicht geladen werden: {{message}}",
@@ -489,7 +1116,8 @@
     "oauth": "OAuth",
     "authentication": "Authentifizierung",
     "apiKey": "API-Schlüssel",
-    "tushareTokenDesc": "Verwendet für China-A-Aktien, Futures, Fonds und Makrodaten. Falls nicht gesetzt, greift das Projekt auf AKShare zurück, sofern verfügbar."
+    "tushareTokenDesc": "Verwendet für China-A-Aktien, Futures, Fonds und Makrodaten. Falls nicht gesetzt, greift das Projekt auf AKShare zurück, sofern verfügbar.",
+    "gildataTokenDesc": "Optionale Gildata-Daten: bereinigte Tageskurse chinesischer A-Aktien, unbereinigte Hongkong- und Indexkurse, Nettoinventarwerte nicht börsengehandelter Fonds sowie chinesische Makro-, Mitteilungs- und Research-Tools."
   },
   "qveris": {
     "title": "QVeris-Tool-Marktplatz",
@@ -566,6 +1194,7 @@
     "dropFiles": "Dateien hier ablegen",
     "removeAttachment": "{{filename}} entfernen",
     "uploadFailed": "Hochladen fehlgeschlagen: {{error}}",
+    "messageTooLong": "Die Nachricht überschreitet {{limit}} Zeichen einschließlich Anhangsinformationen und Teamanweisungen. Kürze sie vor dem Senden.",
     "failedToSend": "Nachricht konnte nicht gesendet werden, bitte erneut versuchen.",
     "failedToContinue": "Ziel konnte nicht fortgesetzt werden, bitte erneut versuchen.",
     "runtimeBadge": "LAUFZEIT",
@@ -608,7 +1237,10 @@
     "resumeConnector": "Connector fortsetzen",
     "resumeConnectorTitle": "Kill-Switch löschen und Connector-Aktivität wieder aktivieren",
     "connectorResumed": "Connector fortgesetzt",
-    "failedToResumeConnector": "Connector konnte nicht fortgesetzt werden."
+    "failedToResumeConnector": "Connector konnte nicht fortgesetzt werden.",
+    "tokenUsage": {
+      "live": "Tokens"
+    }
   },
   "runDetail": {
     "title": "Durchlauf-Details",
@@ -669,6 +1301,33 @@
     "reproducibility": "Reproduzierbarkeit",
     "metrics": "Metriken",
     "validationPayload": "Validierung",
+    "trust": {
+      "executionRecords": "Ausführungsprotokolle",
+      "executionDescription": "Aufgezeichnete Ausführungsschritte und Hashes ihrer Eingaben und Ergebnisse.",
+      "noExecutionRecords": "Für diesen Lauf wurden keine Ausführungsprotokolle gespeichert.",
+      "startedAt": "Beginn (UTC)",
+      "endedAt": "Ende (UTC)",
+      "argsHash": "SHA-256 der Argumente",
+      "resultHash": "SHA-256 des Ergebnisses",
+      "metricEvidence": "Kennzahlennachweise",
+      "evidenceDescription": "Verweise auf gespeicherte Kennzahlendaten. Prüfsummen identifizieren die aufgezeichneten Dateien; diese Ansicht prüft sie nicht unabhängig.",
+      "noMetricEvidence": "Für diesen Lauf wurden keine Kennzahlennachweise gespeichert.",
+      "metric": "Kennzahl",
+      "artifact": "Artefakt",
+      "column": "Spalte",
+      "row": "Datenzeile (ab 1, ohne Kopfzeile)",
+      "artifactHash": "SHA-256 des Artefakts",
+      "tools": {
+        "backtest": "Backtest",
+        "load_data": "Daten laden",
+        "generate_signals": "Signale erzeugen"
+      },
+      "status": {
+        "ok": "Abgeschlossen",
+        "error": "Fehlgeschlagen",
+        "cancelled": "Abgebrochen"
+      }
+    },
     "artifactChecksums": "Artefakt-Prüfsummen",
     "path": "Pfad",
     "size": "Größe",
@@ -714,6 +1373,19 @@
     "ddNotRecovered": "Nicht erholt",
     "ddDays": "{{count}} T",
     "dashboard": "Research-Dashboard",
+    "llmUsage": {
+      "tab": "Token-Nutzung",
+      "provider": "Anbieter",
+      "model": "Modell",
+      "inputTokens": "Eingabe-Tokens",
+      "outputTokens": "Ausgabe-Tokens",
+      "totalTokens": "Tokens gesamt",
+      "calls": "Aufrufe",
+      "cacheRead": "Cache-Lese-Tokens",
+      "cacheCreation": "Tokens für Cache-Erstellung",
+      "perIteration": "Detail nach Iteration",
+      "iteration": "Iteration"
+    },
     "positions": {
       "tab": "Positionen",
       "weightDistribution": "Gewichtsverteilung",
@@ -745,6 +1417,10 @@
         "crypto": "Krypto",
         "futures": "Futures",
         "forex": "Devisen",
+        "ar_equity": "Argentinien-Aktien",
+        "br_equity": "Brasilien-Aktien",
+        "uk_equity": "UK-Aktien",
+        "vietnam_equity": "Vietnam-Aktien",
         "other": "Sonstige"
       }
     },
@@ -992,7 +1668,7 @@
     "dead": "Tot",
     "skipped": "Übersprungen",
     "topByIr": "Top 5 nach IR",
-    "mostReversed": "Am meisten umgekehrt",
+    "mostReversed": "Beispiele mit dem niedrigsten IC",
     "byTheme": "Nach Thema",
     "noRows": "Keine Zeilen.",
     "meanIc": "Mittelwert IC",
@@ -1182,7 +1858,10 @@
     "output": "Ausgabe",
     "waitingForEvents": "Warten auf Agent-Ereignisse...",
     "teamStarting": "Das Team startet — erste Updates in wenigen Sekunden…",
-    "detailsUnavailable": "Details nicht verfügbar"
+    "detailsUnavailable": "Details nicht verfügbar",
+    "tokens": "↑{{input}} ↓{{output}} Tokens",
+    "estimated": "geschätzt",
+    "tokenSourceUnlabeled": "Quelle nicht gekennzeichnet"
   },
   "mandate": {
     "runtimeMandate": "Connector-Runtime-Mandat",
@@ -1481,7 +2160,7 @@
       "badge": "Lokal & schreibgeschützt · Mehrere Konten",
       "title": "Portfolio",
       "subtitle": "Eine Bewertung über alle aktivierten schreibgeschützten Verbindungen. Ein Konto, das nicht gelesen werden kann, wird als Fehler gemeldet und bleibt aus den Summen heraus.",
-      "fxFresh": "USD/CNY {{rate}} · aktueller Kurs",
+      "fxFresh": "USD/CNY {{rate}} · Referenzkurs",
       "fxCached": "USD/CNY {{rate}} · zwischengespeicherter Kurs",
       "manageAccounts": "Konten verwalten",
       "exportCsv": "CSV exportieren",
@@ -1496,7 +2175,9 @@
       "errorReconnect": "Erneutes Verbinden des Kontos fehlgeschlagen",
       "errorReconnectTimeout": "Die Browser-Autorisierung ist abgelaufen. Verbinden Sie sich erneut und schließen Sie die Broker-Autorisierung zeitnah ab.",
       "errorSaveSettings": "Portfolio-Einstellungen konnten nicht gespeichert werden",
-      "errorExport": "Export fehlgeschlagen"
+      "errorExport": "Export fehlgeschlagen",
+      "exportResearch": "Analyse-Snapshot exportieren",
+      "researchSnapshotHint": "Diese Beobachtung ohne Zugangsdaten oder Kontonummern exportieren. Die Snapshot-ID kann in portfolio_summary wiederverwendet werden."
     },
     "metrics": {
       "total": "Gesamtvermögen",
@@ -1644,6 +2325,214 @@
       "accountDeactivated": " · deaktiviert",
       "accountSave": "Dieses Konto verwenden",
       "accountSaved": "Konto gespeichert."
+    },
+    "imports": {
+      "title": "extraETF Investments importieren",
+      "hint": "Nur Bestände, ohne Bargeld oder Livekurse. Das Änderungsdatum der Datei ist kein Kurszeitpunkt; den ISINs ist kein Handelsplatz zugeordnet.",
+      "file": "Investments-CSV",
+      "count": "Erwartete Anzahl der Positionen (in extraETF prüfen)",
+      "age": "Maximales Dateialter (Tage)",
+      "overlap": "Wählen Sie überschneidungsfreie Quellen. Eine extraETF-Ansicht kann hier bereits verbundene Konten enthalten.",
+      "import": "Datei importieren",
+      "importing": "Import läuft…",
+      "success": "Importiert. Fügen Sie den Export aus den verfügbaren Quellen oben hinzu, speichern und aktualisieren Sie.",
+      "source": "Dateiimport",
+      "mtime": "Datei geändert: {{time}}",
+      "expires": "Gültig bis: {{time}}",
+      "tooLarge": "Die Importgrenze beträgt 4 MiB."
+    },
+    "rebalance": {
+      "title": "Allokationsvorschlag",
+      "hint": "Geben Sie Zielanteile mit insgesamt 100% ein. Änderungen sind nur zu prüfende Beträge; Orders, Stückzahlen, Steuern und Gebühren werden nicht berechnet.",
+      "target": "Ziel für {{id}} (%)",
+      "generate": "Vorschlag berechnen",
+      "current": "Aktueller Wert",
+      "targetValue": "Zielwert",
+      "change": "Wertänderung"
     }
+  },
+  "analysis": {
+    "updated": "Aktualisiert",
+    "updating": "Wird berechnet…",
+    "editing": "Parameter geändert",
+    "invalid": "Gültige Parameter eingeben",
+    "failed": "Analyse fehlgeschlagen",
+    "previousResult": "Ergebnis der vorherigen Parameter wird angezeigt",
+    "lastComputed": "Berechnet um {{time}}",
+    "advancedParameters": "Erweiterte Parameter",
+    "chainOnDemand": "Marktkurse bei Bedarf laden; die Berechnung nutzt die eingegebenen Prämien.",
+    "allStrikes": "Alle Ausübungspreise zeigen",
+    "nearAtm": "Nahe ATM zeigen",
+    "chainQuote": "Basiswertkurs {{ticker}}: {{price}}",
+    "lastFetched": "Abgerufen um {{time}}",
+    "assetsValidation": "2–20 verschiedene Anlagen eingeben, getrennt durch Kommas, Leerzeichen oder Semikolons.",
+    "windowObservations": "Renditebeobachtungen",
+    "coverage": "{{count}} gemeinsame Beobachtungen · {{start}} bis {{end}}",
+    "usedAssets": "Verwendete Anlagen: {{assets}}",
+    "missingAssets": "Fehlende Kurse: {{assets}}",
+    "regimeMethod": "Die Regimeanalyse nutzt Pearson-Korrelation; die gewählte Methode gilt für die Matrix.",
+    "evaluateFactor": "Diesen Faktor bewerten",
+    "evaluateSelected": "Auswahl bewerten ({{count}})",
+    "factorSelectionHint": "Einen Faktor bewerten oder wenige vergleichen. Der gesamte Katalog dauert länger.",
+    "resultLimit": "Angezeigte Zeilen (weniger Rechenarbeit entsteht dadurch nicht)",
+    "evaluationScope": "{{count}} Faktoren werden in einem Aktienuniversum bewertet.",
+    "checkingData": "Datenanforderungen werden geprüft…",
+    "ready_public_data": "Nutzt öffentliche Daten. Verfügbarkeit wird bei der Ausführung geprüft.",
+    "ready_tushare_ready": "Tushare konfiguriert. CSI 300 benötigt auch Rechte für Tageskurse, Anpassungsfaktoren und historische Indexmitglieder.",
+    "ready_tushare_token_missing": "CSI 300 benötigt ein Tushare-Token und Datenrechte. Konfigurieren oder S&P 500 wählen.",
+    "ready_tushare_dependency_missing": "Tushare installieren oder S&P 500 wählen.",
+    "ready_single_asset": "BTC-USDT ist eine einzelne Anlage; Querschnitts-IC benötigt ein Aktienuniversum. CSI 300 oder S&P 500 wählen.",
+    "stage_loading_data": "Universum und Kurshistorie werden geladen…",
+    "stage_preparing_returns": "Künftige Renditen werden vorbereitet…",
+    "stage_computing": "Faktorwerte werden berechnet…",
+    "backgroundJob": "Bei laufendem Server können Sie die Seite verlassen und zur Aufgabe zurückkehren.",
+    "resumeJob": "Aufgabe erneut verbinden",
+    "streamInterrupted": "Verbindung unterbrochen. Erneut verbinden, um Fortschritt und Ergebnisse abzurufen.",
+    "jobExpired": "Aufgabe abgelaufen oder Server neu gestartet. Neue Bewertung starten.",
+    "source_unavailable": "Quelle nicht verfügbar oder nicht konfiguriert",
+    "fetch_failed": "Anfrage fehlgeschlagen",
+    "no_data": "Keine Kurse für dieses Symbol und diesen Zeitraum",
+    "factorCoverage": "Kurse für {{count}} von {{total}} angefragten Aktien abgerufen.",
+    "survivorshipBias": "Es werden aktuelle Indexmitglieder verwendet; historische Ergebnisse haben einen Überlebensbias.",
+    "degradedUniverse": "Die Indexliste war nicht verfügbar; dieser Lauf nutzt ein offengelegtes kleineres Ersatzuniversum.",
+    "selectedFactor": "Gewählter Faktor: {{id}}. Nur dieser Faktor wird bewertet.",
+    "fundamentalsRequirement": "Fundamentalfaktoren benötigen PIT-sichere SEC-Abschlüsse und ein US-Aktienuniversum (S&P 500).",
+    "noEvaluableFactors": "Keine Faktoren konnten bewertet werden. Längeren Verlauf wählen und erforderliche Datenfelder sowie Aktienuniversum prüfen."
+  },
+  "customProviders": {
+    "loadFailed": "Benutzerdefinierte Anbieter konnten nicht geladen werden",
+    "testPassed": "Anbietertest erfolgreich",
+    "testFailed": "Anbietertest fehlgeschlagen",
+    "saved": "Anbieter im lokalen Zugangsdaten-Speicher gespeichert",
+    "saveFailed": "Anbieter konnte nicht gespeichert werden",
+    "activationFailed": "Anbieter konnte nicht aktiviert werden",
+    "title": "Benutzerdefinierte OpenAI-kompatible Anbieter",
+    "description": "Füge einen Anbieter mit kompatibler Chat-Completions-API hinzu. Der Test sendet eine kurze Modellanfrage. Nach Erfolg wird der Schlüssel im Zugangsdaten-Speicher des Betriebssystems abgelegt.",
+    "keyPrivate": "Schlüssel wird nie angezeigt",
+    "active": "Aktiv",
+    "keyStored": "Schlüssel gespeichert",
+    "activate": "Aktivieren",
+    "empty": "Noch keine benutzerdefinierten Anbieter. Füge unten einen hinzu und teste ihn vor dem Speichern.",
+    "add": "Anbieter hinzufügen",
+    "id": "Anbieter-ID",
+    "idHint": "Kleinbuchstaben, Zahlen, Punkte, Bindestriche oder Unterstriche.",
+    "label": "Anzeigename",
+    "labelPlaceholder": "Mein Anbieter",
+    "baseUrl": "API-Basis-URL",
+    "urlHint": "Verwende die API-Basisadresse. Die URL darf keinen API-Schlüssel enthalten.",
+    "model": "Modell",
+    "key": "API-Schlüssel",
+    "keyPlaceholder": "Schlüssel für diesen Test eingeben",
+    "testing": "Wird getestet…",
+    "test": "Verbindung testen",
+    "saving": "Wird gespeichert…",
+    "save": "Getesteten Anbieter speichern",
+    "saveHint": "Speichern ist erst nach erfolgreichem Test möglich. Die Aktivierung wird separat bestätigt.",
+    "confirm": "{{label}} für neue Agentenanfragen aktivieren?",
+    "activated": "{{label}} ist jetzt aktiv",
+    "preview": "Test erfolgreich: {{preview}}",
+    "error": "Anbietertest fehlgeschlagen: {{error}}",
+    "waiting": "Der Anbieter benötigt länger als üblich ({{seconds}} s). Die Anfrage wartet weiter bis zum Server-Timeout."
+  },
+  "pixelOffice": {
+    "title": "Pixelbüro",
+    "description": "Plane und verteile Rechercheaufgaben. Eine Zuweisung startet keine Ausführung. Ränge sind Bezeichnungen und erteilen keine Handelsrechte.",
+    "refresh": "Aktualisieren",
+    "loading": "Büro wird geladen…",
+    "unavailable": "Büro nicht verfügbar. Bitte aktualisieren.",
+    "floor": "Bürofläche",
+    "taskCount": "Offene Aufgaben: {{count}}",
+    "board": "Aufgabenübersicht",
+    "empty": "Noch keine Aufgaben.",
+    "assignee": "Zuständig",
+    "unassigned": "Nicht zugewiesen",
+    "result": "Ergebnis",
+    "complete": "Abschluss erfassen",
+    "create": "Aufgabe erstellen",
+    "taskTitle": "Aufgabentitel",
+    "instructions": "Anweisungen",
+    "priority": "Priorität",
+    "ranksTitle": "Organisatorische Ränge",
+    "priorities": {
+      "low": "Niedrig",
+      "normal": "Normal",
+      "high": "Hoch"
+    },
+    "statuses": {
+      "queued": "Wartend",
+      "assigned": "Zugewiesen",
+      "completed": "Abgeschlossen"
+    },
+    "ranks": {
+      "Operator": "Mitglied",
+      "Senior": "Erfahren",
+      "Lead": "Leitung"
+    }
+  },
+  "runnerBudget": {
+    "unavailable": "Modellkostenstatus nicht verfügbar.",
+    "warning": "Modellaufrufe kosten auch ohne Handelsausführung Geld.",
+    "summary": "Alle {{minutes}} Minuten; höchstens {{turns}} Entscheidungen und {{tokens}} Token pro UTC-Tag.",
+    "dailySummary": "Täglich um {{time}} ({{timezone}}); ersetzt das Intervall.",
+    "usage": "Heute: {{turns}} Entscheidungen · {{tokens}} Token · geschätzt {{cost}}.",
+    "estimateUnknown": "Eine Tagesschätzung benötigt Preise und gemessenen Verbrauch.",
+    "estimate": "Geschätzte tägliche Modellkosten: etwa ${{cost}}, anhand des Verbrauchs.",
+    "configure": "Modellzeitplan und Kostenlimits",
+    "interval_seconds": "Entscheidungsintervall (Sekunden)",
+    "max_daily_turns": "Maximale Entscheidungen pro UTC-Tag",
+    "max_daily_tokens": "Maximale Token pro UTC-Tag",
+    "max_daily_cost_usd": "Geschätztes USD-Tageslimit (optional)",
+    "input_usd_per_million": "USD pro Million Eingabetoken (optional)",
+    "output_usd_per_million": "USD pro Million Ausgabetoken (optional)",
+    "daily_at": "Tägliche Uhrzeit (optional)",
+    "timezone": "Zeitzone des Zeitplans",
+    "save": "Einstellungen speichern",
+    "limitsNote": "Jede Entscheidung beginnt eine neue Unterhaltung. Limits werden nach der Antwort geprüft und können um diese Antwort überschritten werden. Fehlender Verbrauch oder eine Überschreitung löst den vorhandenen Notstopp aus.",
+    "pricesNote": "Preise sind Betreiberschätzungen. Den höchsten Eingabe-/Cache-Schreibpreis verwenden; Cache-Rabatte und zusätzliche Modellaufrufe sind nicht enthalten.",
+    "stopToEdit": "Vor Änderungen den Runner stoppen."
+  },
+  "paper": {
+    "title": "Simulierter Handel",
+    "description": "Tägliche Trades mit virtuellem Kapital testen. Es werden keine Brokeraufträge gesendet. Bardividenden sind nicht enthalten; die Ergebnisse zeigen keine Gesamtrendite.",
+    "accounts": "Konten",
+    "newAccount": "Neues Simulationskonto",
+    "eligible": "Ab {{date}} möglich; an Feiertagen wird auf die nächste verfügbare Sitzung gewartet.",
+    "cash": "Bargeld",
+    "pending": "Erste Abrechnung ausstehend",
+    "label": "Kontoname",
+    "market": "Markt",
+    "start": "Beginn",
+    "today": "Heute",
+    "nextSession": "Nächster Handelstag",
+    "initialPositions": "Anfangspositionen (Menge und Durchschnittskosten)",
+    "symbol": "Symbol (z. B. AAPL.US)",
+    "quantity": "Menge",
+    "cost": "Durchschnittskosten",
+    "remove": "Entfernen",
+    "addPosition": "Position hinzufügen",
+    "create": "Konto erstellen",
+    "working": "Wird verarbeitet…",
+    "advance": "Tagesschritt abrechnen",
+    "executionNote": "Nur abgeschlossene Tageskerzen werden abgerechnet. Strategien sehen vorherige Tage und handeln zum Schlusskurs des Ausführungstags. Bitte 30 Minuten nach regulärem Börsenschluss warten; es wird keine automatische Ausführung geplant.",
+    "date": "Ausführungsdatum",
+    "mode": "Eingabemodus",
+    "orders": "Explizite Aufträge",
+    "strategy": "Strategiedatei",
+    "strategyPath": "Pfad im strategies-Ordner der Laufzeitumgebung",
+    "side": "Richtung",
+    "buy": "Kaufen",
+    "sell": "Verkaufen",
+    "addOrder": "Auftrag hinzufügen",
+    "emptyOrders": "Ohne Aufträge wird nur bewertet. Marktaufträge werden zum Tagesschluss ausgeführt; keine Intraday-Simulation.",
+    "saved": "Kontobuch gespeichert.",
+    "notSaved": "Kontobuch unverändert. Ergebnis vor erneutem Versuch prüfen.",
+    "result": "Schrittergebnis",
+    "price": "Preis",
+    "fee": "Gebühr",
+    "history": "Kontowertverlauf",
+    "nav": "Nettovermögenswert",
+    "us": "US-Aktien · USD",
+    "hk": "Hongkong-Aktien · HKD",
+    "cn_a": "Chinesische A-Aktien · CNY"
   }
 }

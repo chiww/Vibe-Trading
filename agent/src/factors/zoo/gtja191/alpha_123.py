@@ -19,6 +19,7 @@ import pandas as pd
 from src.factors.base import (
     decay_linear,
     delta,
+    observed_over,
     rank,
     safe_div,
     scale,
@@ -39,7 +40,7 @@ ALPHA_ID = "gtja191_123"
 __alpha_meta__ = {
     'id': 'gtja191_123',
     'theme': ['volume'],
-    'formula_latex': 'see body',
+    'formula_latex': '((RANK(CORR(SUM(((HIGH+LOW)/2),20),SUM(MEAN(VOLUME,60),20),9)) < RANK(CORR(LOW,VOLUME,6))) * -1)',
     'columns_required': ['open', 'high', 'low', 'close', 'volume'],
     'extras_required': [],
     'universe': ['equity_cn'],
@@ -65,4 +66,6 @@ def compute(panel):
     left = rank(ts_corr(((h + l) / 2.0).rolling(20).sum(), ts_mean(v, 60).rolling(20).sum(), 9))
     right = rank(ts_corr(l, v, 6))
     out = (left < right).astype("float64") * -1.0
-    return out
+    # Reach of each input through the nested windows; a gap inside it is not a verdict (#1463).
+    # v: mean 60 + sum 20 + corr 9; h/l: sum 20 + corr 9.
+    return out.where(observed_over((v, 87), (h, 28), (l, 28)))

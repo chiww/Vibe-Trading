@@ -6,7 +6,7 @@ Uses ChinaAEngine as a concrete implementation since BaseEngine is abstract.
 from __future__ import annotations
 
 import json
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 
 import numpy as np
 import pandas as pd
@@ -239,6 +239,101 @@ def test_fill_delta_artifact_is_jsonl_and_exposes_weighted_holding(tmp_path):
     assert exits["holding_bars"].tolist() == pytest.approx([1.5, 1.5])
 
 
+def test_trades_csv_entry_row_is_the_opening_fill_after_a_scale_in(tmp_path):
+    """The entry row must be a trade that happened, not the running average cost.
+
+    A scale-in moves the position's weighted entry price, but the entry row is
+    stamped with the first open's date, so pairing the two would describe a
+    fill that never took place. Each round trip still writes exactly two rows.
+    """
+    from src.strategy_discovery.run_artifacts import read_trade_activity
+
+    engine = _AdjustmentEngine()
+    weights = {"A": [0.25, 0.50, 0.0, 0.25, 0.0]}
+    execution_prices = {"A": [100.0, 120.0, 130.0, 110.0, 115.0]}
+    _run_adjustments(engine, weights, execution_prices=execution_prices)
+    dates = pd.date_range("2026-01-02", periods=5)
+    prices = pd.DataFrame(
+        {"open": execution_prices["A"], "close": execution_prices["A"]}, index=dates
+    )
+    equity = pd.Series(
+        [snapshot.equity for snapshot in engine.equity_snapshots], index=dates
+    )
+    engine._write_artifacts(
+        tmp_path,
+        {"A": prices},
+        dates,
+        equity,
+        pd.Series(1_000.0, index=dates),
+        pd.Series(0.0, index=dates),
+        pd.DataFrame(weights, index=dates),
+        {},
+        ["A"],
+    )
+
+    assert [fill.action for fill in engine.fill_records] == [
+        "open",
+        "increase",
+        "close",
+        "open",
+        "close",
+    ]
+    first_open, _, _, second_open, _ = engine.fill_records
+    assert engine.trades[0].entry_price != pytest.approx(first_open.execution_price)
+
+    path = tmp_path / "artifacts" / "trades.csv"
+    trades = pd.read_csv(path)
+    assert len(trades) == 2 * len(engine.trades) == 4
+    entries = trades[trades["event"] == "entry"]
+    assert entries["timestamp"].tolist() == [
+        str(first_open.timestamp.date()),
+        str(second_open.timestamp.date()),
+    ]
+    assert entries["price"].tolist() == pytest.approx(
+        [first_open.execution_price, second_open.execution_price]
+    )
+    assert entries["qty"].tolist() == pytest.approx(
+        [abs(first_open.signed_quantity), abs(second_open.signed_quantity)]
+    )
+    assert entries["reason"].tolist() == ["signal", "signal"]
+
+    exit_dates, max_concurrent = read_trade_activity(path)
+    assert [str(day) for day in exit_dates] == [
+        str(trade.exit_time.date()) for trade in engine.trades
+    ]
+    assert max_concurrent == 1
+
+
+def test_trades_csv_entry_row_falls_back_to_the_trade_without_an_opening_fill(
+    tmp_path,
+):
+    """A position that carries no opening record keeps the trade's own fields."""
+    engine = _AdjustmentEngine()
+    engine.positions["A"] = _position(size=5.0)
+    engine._close_position("A", 110.0, _ADJUST_TS, "signal")
+    dates = pd.DatetimeIndex([_ENTRY_TS, _ADJUST_TS])
+    engine._write_artifacts(
+        tmp_path,
+        {},
+        dates,
+        pd.Series(1_000.0, index=dates),
+        pd.Series(1_000.0, index=dates),
+        pd.Series(0.0, index=dates),
+        pd.DataFrame({"A": [1.0, 0.0]}, index=dates),
+        {},
+        ["A"],
+    )
+
+    trades = pd.read_csv(tmp_path / "artifacts" / "trades.csv")
+    assert len(trades) == 2
+    entry = trades.iloc[0]
+    assert (entry["timestamp"], entry["price"], entry["qty"]) == (
+        str(_ENTRY_TS.date()),
+        100.0,
+        5.0,
+    )
+
+
 def test_partial_reduction_allocates_nonzero_entry_and_exit_fees():
     engine = _AdjustmentEngine(fee_rate=0.01)
     _run_adjustments(engine, {"A": [0.50, 0.20]})
@@ -269,7 +364,9 @@ def test_rebalance_rejects_same_direction_adjustment_with_changed_leverage():
     with pytest.raises(ValueError, match="leverage"):
         _run_adjustments(engine, {"A": [0.25, 0.50]})
     assert engine.capital == 750.0
-    assert engine.bar_positions == [{"A": _position(size=2.5)}]
+    assert engine.bar_positions == [
+        {"A": replace(_position(size=2.5), open_price=100.0, open_size=2.5)}
+    ]
 
 
 def test_rebalance_reduces_short_with_correct_signed_pnl():
@@ -938,3 +1035,77 @@ def test_rebalance_sleeve_below_one_lot_at_full_scale_is_the_lot_rule():
     assert engine.plan_rejections[("B", "zero_size")] == 1
     assert ("B", "insufficient_capital") not in engine.plan_rejections
     assert engine.bar_capitals[0] >= 0.0
+
+
+class _FundingDebitAdjustmentEngine(_AdjustmentEngine):
+    """Debits a fee after every bar, as CompositeEngine's crypto funding does."""
+
+    def __init__(self, **overrides):
+        super().__init__(**overrides)
+        self.rejected: list[tuple[str, str]] = []
+
+    def after_rebalance_bar(self, timestamp, data_map, codes):
+        self.capital -= float(self.config.get("debit", 0.0))
+        return super().after_rebalance_bar(timestamp, data_map, codes)
+
+    def _on_plan_rejected(self, symbol, reason, timestamp):
+        self.rejected.append((symbol, reason))
+
+
+def test_rebalance_with_negative_cash_drops_the_opens_and_keeps_running():
+    """#1542's rebalance sibling: when even an empty open sleeve does not fit
+    (cash below zero, nothing reduced to release it), the run used to abort with
+    'insufficient capital for position rebalance'. The opens are dropped and
+    reported; the rest of the bar and the run go on.
+
+    A takes all 1,000 of cash on bar 0 and the debit leaves -30. A's weight on
+    the later bars keeps it at exactly 10 shares, so nothing is released.
+    """
+    engine = _FundingDebitAdjustmentEngine(debit=30.0)
+    keep_a = 1_000.0 / 970.0
+    _run_adjustments(engine, {"A": [1.0, keep_a, keep_a], "B": [0.0, 0.2, 0.2]})
+
+    assert engine.bar_capitals[0] == pytest.approx(-30.0)
+    assert _sizes(engine.bar_positions[1]) == {"A": 10.0}
+    assert ("B", "insufficient_capital") in engine.rejected
+    assert len(engine.bar_positions) == 3  # the run reached its last bar
+
+
+def test_rebalance_with_negative_cash_still_executes_its_reductions():
+    """Dropping the opens must not drop the reductions: they only release cash.
+
+    Cash is -300 after bar 0 (equity 700); trimming A to 9 shares releases 100,
+    not enough to bring cash to zero, so no open sleeve fits. The trim happens.
+    """
+    engine = _FundingDebitAdjustmentEngine(debit=300.0)
+    _run_adjustments(engine, {"A": [1.0, 900.0 / 700.0], "B": [0.0, 0.1]})
+
+    assert _sizes(engine.bar_positions[1]) == {"A": 9.0}
+    assert ("B", "insufficient_capital") in engine.rejected
+
+
+@pytest.mark.parametrize("units", [("us", "us"), ("ns", "us"), ("s", "ms")])
+def test_align_is_the_same_at_any_index_resolution(units: tuple[str, str]) -> None:
+    """_align works on int64 epochs; a duckdb local source arrives as datetime64[us].
+
+    Read as nanoseconds, a microsecond index put the whole run in 1970, and beside
+    a nanosecond source it matched none of that symbol's bars (an all-NaN column).
+    """
+    days = pd.bdate_range("2026-01-02", periods=5)
+    closes = np.array([10.0, 11.0, 12.0, 13.0, 14.0])
+
+    def run(unit_a: str, unit_b: str):
+        idx_a, idx_b = days.as_unit(unit_a), days.as_unit(unit_b)
+        data_map = {
+            "A": pd.DataFrame({"open": closes, "high": closes, "low": closes, "close": closes}, index=idx_a),
+            "B": pd.DataFrame({"open": closes, "high": closes, "low": closes, "close": closes * 2}, index=idx_b),
+        }
+        signal_map = {"A": pd.Series([1.0, 0, 1, 0, 1], index=idx_a), "B": pd.Series(0.5, index=idx_b)}
+        return _align(data_map, signal_map, ["A", "B"])
+
+    expected_dates, expected_close, _, expected_pos, _ = run("ns", "ns")
+    dates, close_df, _, pos_df, _ = run(*units)
+
+    assert list(dates) == list(expected_dates)
+    np.testing.assert_array_equal(close_df.to_numpy(), expected_close.to_numpy())
+    np.testing.assert_array_equal(pos_df.to_numpy(), expected_pos.to_numpy())

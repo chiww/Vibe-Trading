@@ -14,7 +14,6 @@ from src.tools.skill_writer_tool import (
     DeleteSkillTool,
     SkillFileTool,
     _sanitize_skill_name,
-    USER_SKILLS_DIR,
 )
 
 
@@ -87,6 +86,26 @@ class TestSaveSkillTool:
         assert result["status"] == "ok"
         text = (user_dir / "custom" / "SKILL.md").read_text(encoding="utf-8")
         assert "description: Custom skill" in text
+
+    @pytest.mark.parametrize("field", ["name", "name "])
+    def test_save_forces_frontmatter_name_to_match_slug(self, tool: SaveSkillTool, user_dir: Path, field: str) -> None:
+        """A frontmatter name that disagrees with the slug this tool advertises
+        would make the skill unreachable under load_skill(slug) and cause
+        duplicate entries on every lookup; the saved name must always match.
+        """
+        content = f"---\n{field}: MySkill\ndescription: mismatched name\ncategory: user\n---\n\nBody"
+        result = json.loads(tool.execute(name="My Skill", content=content))
+        assert result["status"] == "ok"
+        text = (user_dir / "my-skill" / "SKILL.md").read_text(encoding="utf-8")
+        assert "name: my-skill" in text
+        assert "name: MySkill" not in text
+
+    def test_save_inserts_name_when_frontmatter_lacks_it(self, tool: SaveSkillTool, user_dir: Path) -> None:
+        content = "---\ndescription: no name key\ncategory: user\n---\n\nBody"
+        result = json.loads(tool.execute(name="headless", content=content))
+        assert result["status"] == "ok"
+        text = (user_dir / "headless" / "SKILL.md").read_text(encoding="utf-8")
+        assert "name: headless" in text
 
     def test_save_missing_name(self, tool: SaveSkillTool) -> None:
         result = json.loads(tool.execute(content="body"))
@@ -239,6 +258,15 @@ class TestSkillFileTool:
         assert result["status"] == "ok"
         assert not (skill_dir / "assets" / "data.csv").exists()
 
+    def test_remove_invalid_subdir(self, setup) -> None:
+        tool, _, skill_dir = setup
+        (skill_dir / "LICENSE").write_text("MIT", encoding="utf-8")
+        result = json.loads(tool.execute(
+            action="remove", skill_name="file-test", path="LICENSE",
+        ))
+        assert result["status"] == "error"
+        assert (skill_dir / "LICENSE").exists()
+
     def test_remove_skill_md_blocked(self, setup) -> None:
         tool, _, _ = setup
         result = json.loads(tool.execute(
@@ -303,3 +331,26 @@ class TestSkillCRUDLifecycle:
             r = json.loads(delete.execute(name="lifecycle"))
             assert r["status"] == "ok"
             assert not (tmp_path / "lifecycle").exists()
+
+
+@pytest.mark.parametrize("action", ["write", "remove"])
+def test_auxiliary_operations_refuse_parent_traversal(tmp_path, action):
+    skill = tmp_path / "demo"
+    (skill / "assets").mkdir(parents=True)
+    (skill / "LICENSE").write_text("MIT")
+    with patch("src.tools.skill_writer_tool.USER_SKILLS_DIR", tmp_path):
+        result = json.loads(SkillFileTool().execute(action=action, skill_name="demo", path="assets/../LICENSE", content="poison"))
+    assert result["status"] == "error"
+    assert (skill / "LICENSE").read_text() == "MIT"
+
+
+@pytest.mark.parametrize("action", ["write", "remove"])
+def test_auxiliary_operations_refuse_symlink_into_forbidden_sibling(tmp_path, action):
+    skill = tmp_path / "demo"
+    (skill / "private").mkdir(parents=True)
+    (skill / "private/data").write_text("original")
+    (skill / "assets").symlink_to(skill / "private", target_is_directory=True)
+    with patch("src.tools.skill_writer_tool.USER_SKILLS_DIR", tmp_path):
+        result = json.loads(SkillFileTool().execute(action=action, skill_name="demo", path="assets/data", content="poison"))
+    assert result["status"] == "error"
+    assert (skill / "private/data").read_text() == "original"

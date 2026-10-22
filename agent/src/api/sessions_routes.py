@@ -13,7 +13,9 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from src.session.events import SSEEvent
@@ -42,9 +44,14 @@ class SessionResponse(BaseModel):
     last_attempt_id: Optional[str] = None
 
 
+# Bound interactive request size. This character limit is independent of the
+# selected model's token window, which the runtime manages separately.
+MAX_MESSAGE_CHARS = 100_000
+
+
 class SendMessageRequest(BaseModel):
-    """Send chat message: natural-language strategy description."""
-    content: str = Field(..., description="Natural language strategy description", min_length=1, max_length=5000)
+    """Send an interactive research prompt."""
+    content: str = Field(..., description="Research prompt", min_length=1, max_length=MAX_MESSAGE_CHARS)
 
 
 class MessageResponse(BaseModel):
@@ -318,11 +325,24 @@ def _live_action_frame_from_tool_result(event: Any) -> Optional[str]:
 # ============================================================================
 
 def register_sessions_routes(app: FastAPI) -> None:
-    """Mount the session/goal routes onto ``app``.
+    """Mount session and goal routes using the host api_server dependencies."""
+    @app.exception_handler(RequestValidationError)
+    async def compact_message_validation(request: Request, exc: RequestValidationError):
+        """Report oversized chat input without echoing the rejected prompt."""
+        if re.fullmatch(r"/sessions/[^/]+/messages", request.url.path) and any(
+            error.get("type") == "string_too_long" and error.get("loc") == ("body", "content")
+            for error in exc.errors()
+        ):
+            return JSONResponse(
+                status_code=422,
+                content={"detail": {
+                    "code": "message_too_long",
+                    "max_length": MAX_MESSAGE_CHARS,
+                    "message": f"Message must contain at most {MAX_MESSAGE_CHARS} characters. Shorten it before sending.",
+                }},
+            )
+        return await request_validation_exception_handler(request, exc)
 
-    Resolves shared dependencies from the host ``api_server`` module via
-    ``sys.modules``.
-    """
     import sys as _sys
 
     host = _sys.modules.get("api_server") or _sys.modules.get("agent.api_server")
@@ -659,7 +679,7 @@ def register_sessions_routes(app: FastAPI) -> None:
         if req.title is not None:
             session.title = req.title
         session.updated_at = datetime.now(timezone.utc).isoformat()
-        svc.store.update_session(session)
+        svc.update_session(session)
         return {"status": "updated", "session_id": session_id}
 
     @app.post("/sessions/{session_id}/title/auto", dependencies=[Depends(require_auth)])
@@ -724,9 +744,18 @@ def register_sessions_routes(app: FastAPI) -> None:
         if not title:
             raise HTTPException(status_code=502, detail="empty title from model")
 
+        # Generation yields to other requests. Reload their persisted metadata
+        # and recheck a manual rename before this synchronous commit section.
+        session = svc.store.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+        current = (session.title or "").strip()
+        if current and current != auto_prefix:
+            return {"status": "kept", "session_id": session_id, "title": current}
+
         session.title = title
         session.updated_at = datetime.now(timezone.utc).isoformat()
-        svc.store.update_session(session)
+        svc.update_session(session)
         return {"status": "updated", "session_id": session_id, "title": title}
 
     @app.post("/sessions/{session_id}/messages", dependencies=[Depends(require_auth)])

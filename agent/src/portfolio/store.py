@@ -4,10 +4,31 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
 from src.config.paths import get_runtime_root
+
+
+def _derived_totals_are_complete(payload: dict[str, Any]) -> bool:
+    """Reject snapshots whose derived Binance total omitted an unpriced asset."""
+    for account in payload.get("accounts", []):
+        if account.get("broker") != "binance":
+            continue
+        unpriced_count = account.get("unpriced_position_count")
+        if unpriced_count is not None:
+            if int(unpriced_count or 0) > 0:
+                return False
+            continue
+        # Compatibility for snapshots written before account-level counts were
+        # stored: only Binance positions affect a derived account total.
+        if any(
+            row.get("broker") == "binance" and not row.get("priced")
+            for row in payload.get("positions", [])
+        ):
+            return False
+    return True
 
 
 class PortfolioStore:
@@ -43,6 +64,9 @@ class PortfolioStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_created
                     ON portfolio_snapshots(created_at DESC);
+                CREATE TABLE IF NOT EXISTS portfolio_fx_quotes (
+                    id INTEGER PRIMARY KEY CHECK (id = 1), payload TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS portfolio_fx_cache (
                     base TEXT NOT NULL,
                     quote TEXT NOT NULL,
@@ -88,9 +112,31 @@ class PortfolioStore:
             The snapshot envelope, or ``None`` when nothing matches.
         """
         where = "WHERE complete = 1" if complete_only else ""
+        limit = 2000 if complete_only else 1
+        with self._connect() as db:
+            rows = db.execute(
+                f"SELECT payload FROM portfolio_snapshots {where} ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        for row in rows:
+            payload = json.loads(row["payload"])
+            if not complete_only or _derived_totals_are_complete(payload):
+                return payload
+        return None
+
+    def get(self, snapshot_id: str) -> dict[str, Any] | None:
+        """Return one immutable snapshot by id.
+
+        Args:
+            snapshot_id: Exact persisted snapshot identifier.
+
+        Returns:
+            The stored snapshot envelope, or None when the id is absent.
+        """
         with self._connect() as db:
             row = db.execute(
-                f"SELECT payload FROM portfolio_snapshots {where} ORDER BY created_at DESC LIMIT 1"
+                "SELECT payload FROM portfolio_snapshots WHERE id = ? LIMIT 1",
+                (str(snapshot_id),),
             ).fetchone()
         return json.loads(row["payload"]) if row else None
 
@@ -126,14 +172,24 @@ class PortfolioStore:
                 {where}
                 ORDER BY created_at DESC LIMIT ?
                 """,
-                (2000 if valuation_version is not None else row_limit,),
+                (2000 if valuation_version is not None or complete_only else row_limit,),
             ).fetchall()
         history = []
         for row in rows:
-            if valuation_version is not None:
-                payload = json.loads(row["payload"])
-                if payload.get("valuation_version") != valuation_version:
+            payload = json.loads(row["payload"])
+            if valuation_version is not None or complete_only:
+                if valuation_version is not None and payload.get("valuation_version") != valuation_version:
                     continue
+                if complete_only and not _derived_totals_are_complete(payload):
+                    continue
+            total_hkd = None
+            try:
+                usd_hkd = Decimal(str((payload.get("fx") or {}).get("usd_hkd")))
+                usd = Decimal(row["total_usd"])
+                if usd_hkd.is_finite() and usd_hkd > 0 and usd.is_finite():
+                    total_hkd = str(usd * usd_hkd)
+            except (InvalidOperation, ValueError, TypeError):
+                pass  # Historical snapshots without FX stay explicitly unpriced.
             history.append(
                 {
                     "id": row["id"],
@@ -141,6 +197,9 @@ class PortfolioStore:
                     "complete": row["complete"],
                     "total_usd": row["total_usd"],
                     "total_cny": row["total_cny"],
+                    "total_hkd": total_hkd,
+                    "total_eur": (str(Decimal(row["total_usd"]) * Decimal(str(payload["fx"]["rates"]["EUR"])))
+                                  if payload.get("fx", {}).get("rates", {}).get("EUR") else None),
                 }
             )
             if len(history) >= row_limit:
@@ -229,3 +288,15 @@ class PortfolioStore:
                 (base, quote),
             ).fetchone()
         return (str(row["rate"]), str(row["fetched_at"])) if row else None
+
+
+    def save_fx_quote(self, payload: dict[str, Any]) -> None:
+        """Atomically cache a whole observation, preserving its rate date."""
+        with self._connect() as db:
+            db.execute("INSERT OR REPLACE INTO portfolio_fx_quotes VALUES (1, ?)", (json.dumps(payload),))
+
+    def load_fx_quote(self) -> dict[str, Any] | None:
+        """Read one complete cached observation, never a mixture of rate dates."""
+        with self._connect() as db:
+            row = db.execute("SELECT payload FROM portfolio_fx_quotes WHERE id = 1").fetchone()
+        return json.loads(row[0]) if row else None

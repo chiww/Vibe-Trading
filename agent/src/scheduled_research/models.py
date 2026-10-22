@@ -9,172 +9,27 @@ to a follow-up PR once the product shape is confirmed.
 from __future__ import annotations
 
 import logging
-import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, Optional, Set
-from zoneinfo import ZoneInfo
+from typing import Any, Dict, Optional
 
 from .verdict import VerdictRecord
 
+# --- Schedule grammar, moved to src.scheduling.triggers (scheduler unification) ---
+# Re-exported here so existing ``from src.scheduled_research.models import ...``
+# keeps working (same convention as src/agent/loop.py's llm_usage re-export).
+from src.scheduling.triggers import (
+    CRON_BOUNDS as CRON_BOUNDS,
+    is_interval_schedule as is_interval_schedule,
+    parse_cron_field as parse_cron_field,
+    validate_schedule as validate_schedule,
+    validate_timezone as validate_timezone,
+    validate_timezone_shape as validate_timezone_shape,
+)
+from src.scheduling.types import ExecutorKind, is_executor_kind
+
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Schedule validation
-# ---------------------------------------------------------------------------
-
-# Accept either:
-#   * a bare positive integer (interval in milliseconds), e.g. "60000"
-#   * a simplified cron expression with 5 fields, e.g. "0 */6 * * *"
-#     Fields: minute hour day-of-month month day-of-week
-#     Each field may be: *, */n, or a comma-separated list of numbers and
-#     low-high ranges (e.g. "1-5", "1,3,5", "1,3-5")
-_INTERVAL_MS_RE = re.compile(r"^[1-9][0-9]*$")
-_CRON_STEP_RE = re.compile(r"^\*/[1-9][0-9]*$")
-_CRON_ATOM_RE = re.compile(r"^([0-9]+)(?:-([0-9]+))?$")
-_CRON_PARTS = 5
-# Inclusive (low, high) bounds per cron field: minute hour day-of-month month
-# day-of-week. Every number in a field — a bare value, a ``*/n`` step, or
-# either end of a range — is validated against these bounds so out-of-range
-# values (e.g. minute ``99``) are rejected. Day-of-week uses the cron
-# convention Sunday == 0; ``7`` is not accepted as a Sunday alias.
-CRON_BOUNDS = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 6))
-
-
-def _validate_cron_field(part: str, low: int, high: int) -> None:
-    """Raise ``ValueError`` when one cron field is malformed or out of range."""
-    if part == "*":
-        return
-    if _CRON_STEP_RE.fullmatch(part):
-        value = int(part[2:])
-        if not low <= value <= high:
-            raise ValueError(f"cron field {part!r} is out of range; expected {low}-{high}")
-        return
-    for atom in part.split(","):
-        match = _CRON_ATOM_RE.fullmatch(atom)
-        if match is None:
-            raise ValueError(
-                f"cron field {part!r} is not valid; each field must be *, */n, "
-                f"or a comma-separated list of numbers and low-high ranges"
-            )
-        start = int(match.group(1))
-        end = int(match.group(2)) if match.group(2) is not None else start
-        if start > end:
-            raise ValueError(f"cron range {atom!r} is reversed; expected low-high")
-        if start < low or end > high:
-            raise ValueError(f"cron field {atom!r} is out of range; expected {low}-{high}")
-
-
-def parse_cron_field(part: str, low: int, high: int) -> Optional[Set[int]]:
-    """Expand one validated cron field into its matching values.
-
-    Kept beside :func:`validate_schedule` so the accepted grammar and the
-    executor's evaluation of it can never drift apart.
-
-    Args:
-        part: One whitespace-delimited cron field (already validated).
-        low: Inclusive lower bound of the field.
-        high: Inclusive upper bound of the field.
-
-    Returns:
-        The set of matching integer values, or ``None`` for the ``*`` wildcard.
-    """
-    if part == "*":
-        return None
-    if part.startswith("*/"):
-        step = int(part[2:])
-        return set(range(low, high + 1, step))
-    values: Set[int] = set()
-    for atom in part.split(","):
-        start, _, end = atom.partition("-")
-        if end:
-            values.update(range(int(start), int(end) + 1))
-        else:
-            values.add(int(start))
-    return values
-
-
-def is_interval_schedule(schedule: str) -> bool:
-    """Return whether *schedule* is the interval-milliseconds form.
-
-    The one place that answers "interval or cron?", so callers that treat the
-    two forms differently — the executor's advancement path, the create route's
-    timezone handling — cannot disagree about which is which.
-
-    Args:
-        schedule: A schedule string in either accepted form.
-
-    Returns:
-        ``True`` for a bare positive-integer interval, ``False`` otherwise
-        (including malformed input, which the validators reject separately).
-    """
-    return bool(_INTERVAL_MS_RE.fullmatch(str(schedule).strip()))
-
-
-def validate_schedule(schedule: str) -> None:
-    """Raise ``ValueError`` when *schedule* is malformed.
-
-    Args:
-        schedule: Either a positive integer string (interval-ms) or a
-            simplified 5-field cron expression.
-
-    Raises:
-        ValueError: When the schedule does not match either accepted form.
-    """
-    if not schedule or not isinstance(schedule, str):
-        raise ValueError("schedule must be a non-empty string")
-
-    if _INTERVAL_MS_RE.fullmatch(schedule.strip()):
-        # 15 digits ≈ 31,000 years in milliseconds — anything longer is not a
-        # usable interval and would only feed int() conversion of huge strings.
-        if len(schedule.strip()) > 15:
-            raise ValueError("interval is too large; expected at most 15 digits of milliseconds")
-        return  # valid interval
-
-    parts = schedule.strip().split()
-    if len(parts) != _CRON_PARTS:
-        raise ValueError(f"schedule must be a positive integer (ms) or a 5-field cron string; got: {schedule!r}")
-    for part, (low, high) in zip(parts, CRON_BOUNDS):
-        _validate_cron_field(part, low, high)
-
-
-def validate_timezone_shape(tz: Optional[str]) -> None:
-    """Raise ``ValueError`` when *tz* is not ``None`` or a non-empty string.
-
-    This is the persistence-level check: it deliberately does NOT resolve the
-    key, because resolvability depends on the host's timezone database. A
-    store written where a key resolved must keep loading and persisting on a
-    host where it does not; the executor surfaces the unresolvable key as a
-    per-job schedule failure instead.
-    """
-    if tz is None:
-        return
-    if not isinstance(tz, str) or not tz.strip():
-        raise ValueError("timezone must be a non-empty IANA timezone key or null")
-
-
-def validate_timezone(tz: Optional[str]) -> None:
-    """Raise ``ValueError`` when *tz* is not a resolvable IANA timezone key.
-
-    ``None`` is always valid and means legacy UTC semantics. Resolution goes
-    through :class:`zoneinfo.ZoneInfo`, so whatever validates here is exactly
-    what the executor can evaluate later.
-
-    Args:
-        tz: An IANA timezone key such as ``"Pacific/Auckland"``, or ``None``.
-
-    Raises:
-        ValueError: When *tz* is not ``None`` and cannot be resolved.
-    """
-    validate_timezone_shape(tz)
-    if tz is None:
-        return
-    try:
-        ZoneInfo(tz)
-    except Exception as exc:
-        raise ValueError(f"timezone {tz!r} is not a recognized IANA timezone key") from exc
-
 
 # ---------------------------------------------------------------------------
 # Status enum
@@ -325,6 +180,18 @@ def _verdict_record_or_none(data: Any, job_id: str) -> Optional[VerdictRecord]:
         return None
 
 
+def contains_pdf_password(value: Any) -> bool:
+    """Return whether arbitrary job config contains the Email PDF secret key."""
+    if isinstance(value, dict):
+        return any(
+            str(key).casefold() == "pdf_password" or contains_pdf_password(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(contains_pdf_password(item) for item in value)
+    return False
+
+
 @dataclass
 class ScheduledResearchJob:
     """Mutable persisted state for a scheduled research / backtest job.
@@ -358,6 +225,13 @@ class ScheduledResearchJob:
         last_verdict: The latest run's parsed verdict record, or ``None`` when
             no completed run produced one yet. Embedded with its own
             ``previous`` so the list view renders a delta in one query.
+        executor_kind: ``"prompt"`` dispatches ``prompt`` to the agent (every
+            job before scheduler unification); ``"internal"`` calls the
+            in-process callable registered under ``internal_callable``.
+        internal_callable: Registry KEY name — never an import path — used to
+            resolve the internal executor for ``executor_kind="internal"``
+            jobs. ``None`` for prompt jobs. Internal/system jobs legitimately
+            carry ``prompt=""``.
     """
 
     id: str
@@ -366,6 +240,14 @@ class ScheduledResearchJob:
     title: str = ""
     source_type: str = "prompt"
     playbook_slug: Optional[str] = None
+    # Downgrade risk (documented, fail-closed): ``_SCHEMA_VERSION`` stays 1
+    # while ``source_type="system"`` rows may exist, so code from BEFORE
+    # scheduler unification rejects such a row in ``from_dict`` and the store
+    # quarantines the whole file as ``.corrupt-<ts>`` (data preserved, not
+    # loaded). Downgrading to a version before scheduler-unification requires
+    # removing system job rows first.
+    executor_kind: ExecutorKind = "prompt"
+    internal_callable: Optional[str] = None
     end_at: Optional[int] = None
     next_run_at: int = field(default_factory=lambda: int(time.time() * 1000))
     status: JobStatus = JobStatus.PENDING
@@ -380,6 +262,8 @@ class ScheduledResearchJob:
     delivery_target: Optional[str] = None
     delivery_target_ref: Optional[str] = None
     delivery_target_label: Optional[str] = None
+    delivery_format: Optional[str] = None
+    protect_pdf: bool = False
     delivery: DeliveryRecord = field(default_factory=DeliveryRecord)
     last_verdict: Optional[VerdictRecord] = None
 
@@ -390,6 +274,12 @@ class ScheduledResearchJob:
             A dict containing all job fields, with ``status`` as its string
             value.
         """
+        if contains_pdf_password(self.config):
+            raise ValueError("scheduled research config must not contain pdf_password")
+        if not isinstance(self.protect_pdf, bool):
+            raise TypeError("'protect_pdf' must be a boolean")
+        if self.protect_pdf and (self.delivery_channel != "email" or self.delivery_format != "pdf"):
+            raise ValueError("'protect_pdf' requires PDF email delivery")
         return {
             "id": self.id,
             "prompt": self.prompt,
@@ -397,6 +287,8 @@ class ScheduledResearchJob:
             "title": self.title,
             "source_type": self.source_type,
             "playbook_slug": self.playbook_slug,
+            "executor_kind": self.executor_kind,
+            "internal_callable": self.internal_callable,
             "end_at": self.end_at,
             "next_run_at": self.next_run_at,
             "status": self.status.value,
@@ -411,6 +303,8 @@ class ScheduledResearchJob:
             "delivery_target": self.delivery_target,
             "delivery_target_ref": self.delivery_target_ref,
             "delivery_target_label": self.delivery_target_label,
+            "delivery_format": self.delivery_format,
+            "protect_pdf": self.protect_pdf,
             "delivery": self.delivery.to_dict(),
             "last_verdict": self.last_verdict.to_dict() if self.last_verdict else None,
         }
@@ -425,10 +319,16 @@ class ScheduledResearchJob:
         Returns:
             The reconstructed ``ScheduledResearchJob``.
 
+        Dicts written before scheduler unification lack ``executor_kind`` and
+        ``internal_callable``; both default to the prompt executor, so old
+        files load unchanged.
+
         Raises:
             KeyError: If a required field is missing.
             TypeError: If a field has the wrong type.
-            ValueError: If ``status`` is not a recognized ``JobStatus`` value.
+            ValueError: If ``status`` is not a recognized ``JobStatus`` value,
+                or ``source_type`` / ``executor_kind`` is outside its domain,
+                or an ``internal`` job names no ``internal_callable``.
         """
         job_id = data["id"]
         prompt = data["prompt"]
@@ -476,18 +376,43 @@ class ScheduledResearchJob:
         end_at = data.get("end_at")
         if not isinstance(title, str):
             raise TypeError("'title' must be a string")
-        if source_type not in {"prompt", "playbook"}:
-            raise ValueError("'source_type' must be 'prompt' or 'playbook'")
+        if source_type not in {"prompt", "playbook", "system"}:
+            raise ValueError("'source_type' must be 'prompt', 'playbook', or 'system'")
+        # Pre-unification dicts carry neither key; both default to the prompt
+        # executor. Unknown or contradictory values are REJECTED rather than
+        # degraded: a misspelled executor must not silently fall back to
+        # dispatching the (possibly empty) prompt.
+        executor_kind = data.get("executor_kind", "prompt")
+        internal_callable = data.get("internal_callable")
+        if not is_executor_kind(executor_kind):
+            raise ValueError("'executor_kind' must be 'prompt' or 'internal'")
+        if internal_callable is not None and not isinstance(internal_callable, str):
+            raise TypeError("'internal_callable' must be a string or null")
+        if executor_kind == "internal" and not internal_callable:
+            raise ValueError(
+                "'executor_kind' 'internal' requires 'internal_callable' "
+                "(a registry key name, not an import path)"
+            )
         if playbook_slug is not None and not isinstance(playbook_slug, str):
             raise TypeError("'playbook_slug' must be a string or null")
         if end_at is not None and (isinstance(end_at, bool) or not isinstance(end_at, int)):
             raise TypeError("'end_at' must be an integer (epoch ms) or null")
         raw_config = data.get("config")
         config: Dict[str, Any] = raw_config if isinstance(raw_config, dict) else {}
+        if contains_pdf_password(config):
+            raise ValueError("scheduled research config must not contain pdf_password")
         delivery_channel = data.get("delivery_channel")
         delivery_target = data.get("delivery_target")
         delivery_target_ref = data.get("delivery_target_ref")
         delivery_target_label = data.get("delivery_target_label")
+        delivery_format = data.get("delivery_format")
+        if delivery_format not in {None, "html", "pdf"}:
+            raise ValueError("'delivery_format' must be 'html', 'pdf', or null")
+        protect_pdf = data.get("protect_pdf", False)
+        if not isinstance(protect_pdf, bool):
+            raise TypeError("'protect_pdf' must be a boolean")
+        if protect_pdf and (delivery_channel != "email" or delivery_format != "pdf"):
+            raise ValueError("'protect_pdf' requires PDF email delivery")
         for name, value in (
             ("delivery_channel", delivery_channel),
             ("delivery_target", delivery_target),
@@ -503,6 +428,8 @@ class ScheduledResearchJob:
             title=title,
             source_type=source_type,
             playbook_slug=playbook_slug,
+            executor_kind=executor_kind,
+            internal_callable=internal_callable,
             end_at=end_at,
             next_run_at=next_run_at,
             status=status,
@@ -517,6 +444,8 @@ class ScheduledResearchJob:
             delivery_target=delivery_target,
             delivery_target_ref=delivery_target_ref,
             delivery_target_label=delivery_target_label,
+            delivery_format=delivery_format,
+            protect_pdf=protect_pdf,
             delivery=DeliveryRecord.from_dict(data.get("delivery")),
             last_verdict=_verdict_record_or_none(data.get("last_verdict"), job_id),
         )

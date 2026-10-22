@@ -2,7 +2,7 @@
 
 The setting has two mutually exclusive delivery paths:
 
-* Relays that require an opt-in (OpenRouter, Requesty) receive
+* Relays that require an opt-in (OpenRouter) receive
   ``extra_body={"reasoning": {"effort": ...}}``.
 * ChatOpenAI-compatible providers receive a top-level ``reasoning_effort``. Its ``gpt-5.6-*``
   models reject function tools on ``/v1/chat/completions`` without one::
@@ -478,7 +478,7 @@ class TestAnthropicNativeProvider:
 
 
 class TestRelayOptIn:
-    """OpenRouter/Requesty keep the pre-existing extra_body opt-in."""
+    """OpenRouter keeps the pre-existing extra_body opt-in."""
 
     def test_openrouter_keeps_extra_body_and_no_top_level_field(self) -> None:
         kwargs = _capture_kwargs(
@@ -493,21 +493,6 @@ class TestRelayOptIn:
         )
 
         assert kwargs["extra_body"] == {"reasoning": {"effort": "high"}}
-        assert kwargs["reasoning_effort"] is None
-
-    def test_requesty_keeps_extra_body_and_no_top_level_field(self) -> None:
-        kwargs = _capture_kwargs(
-            {
-                "LANGCHAIN_PROVIDER": "requesty",
-                "REQUESTY_API_KEY": "rq-test",
-                "REQUESTY_BASE_URL": "https://router.requesty.ai/v1",
-                "LANGCHAIN_MODEL_NAME": "openai/gpt-4o-mini",
-                "LANGCHAIN_REASONING_EFFORT": "medium",
-                "LANGCHAIN_USE_RESPONSES_API": "false",
-            }
-        )
-
-        assert kwargs["extra_body"] == {"reasoning": {"effort": "medium"}}
         assert kwargs["reasoning_effort"] is None
 
 
@@ -743,10 +728,11 @@ class TestSettingsAllowlist:
     """The settings API admits the explicit 'none' value and says so."""
 
     def test_none_is_a_valid_reasoning_effort(self) -> None:
-        from src.api.settings_routes import LLM_REASONING_EFFORTS
+        from src.api.settings_routes import LLM_PROVIDER_BY_NAME
 
-        assert "none" in LLM_REASONING_EFFORTS
-        assert "" in LLM_REASONING_EFFORTS, "empty still means 'leave unset'"
+        # Levels are per provider now; every provider without its own list
+        # inherits the default one, which keeps the explicit "none".
+        assert "none" in LLM_PROVIDER_BY_NAME["openai"].reasoning_efforts
 
     def test_none_persists_through_the_settings_endpoint(
         self, settings_client: TestClient, settings_env_path: Path

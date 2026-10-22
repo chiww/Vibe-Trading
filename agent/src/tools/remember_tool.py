@@ -21,7 +21,7 @@ class RememberTool(BaseTool):
         "Persistent cross-session memory. "
         "save: store user preferences, strategy insights, or project context. "
         "recall: search past memories by keyword. "
-        "forget: remove a memory by title. "
+        "forget: remove a memory by title or filename stem. "
         "reinforce: provide quality feedback on a memory."
     )
     is_readonly = False
@@ -35,7 +35,7 @@ class RememberTool(BaseTool):
             },
             "title": {
                 "type": "string",
-                "description": "Memory title (for save/forget)",
+                "description": "Memory title (save), or title/filename stem (forget)",
             },
             "content": {
                 "type": "string",
@@ -44,7 +44,10 @@ class RememberTool(BaseTool):
             "memory_type": {
                 "type": "string",
                 "enum": ["user", "feedback", "project", "reference"],
-                "description": "Memory category (default: project)",
+                "description": (
+                    "Memory category (save: default project; forget: needed only when the "
+                    "title exists under more than one category)"
+                ),
             },
             "query": {
                 "type": "string",
@@ -155,7 +158,10 @@ class RememberTool(BaseTool):
         title = kwargs.get("title", "")
         if not title:
             return json.dumps({"status": "error", "error": "title required"})
-        removed = self._memory.remove(title)
+        try:
+            removed = self._memory.remove(title, kwargs.get("memory_type"))
+        except ValueError as exc:
+            return json.dumps({"status": "error", "error": str(exc)})
         msg = f"Removed: {title}" if removed else f"Not found: {title}"
         return json.dumps({"status": "ok" if removed else "not_found", "message": msg})
 

@@ -15,10 +15,14 @@ from src.providers.capabilities import (
 
 EXPECTED_PROVIDER_DEFAULTS = {
     "openrouter": "deepseek/deepseek-v4-pro",
-    "requesty": "openai/gpt-4o-mini",
+    "opencode": "deepseek-v4.1-flash",
+    "kimi-coding": "kimi-for-coding",
+    "ollama": "qwen2.5:32b",
+    "copilot": "claude-sonnet-5",
+    "claude-cli": "claude-opus-5-5",
     "openai": "gpt-5.5",
     "anthropic": "claude-sonnet-4-6",
-    "openai-codex": "openai-codex/gpt-5.4",
+    "openai-codex": "openai-codex/gpt-6-sol",
     "deepseek": "deepseek-v4-pro",
     "siliconflow-cn": "deepseek-ai/DeepSeek-V3.1-Terminus",
     "siliconflow-global": "deepseek-ai/DeepSeek-V3.1-Terminus",
@@ -44,6 +48,7 @@ def test_llm_provider_registry_uses_current_default_models() -> None:
     providers = json.loads(providers_path.read_text(encoding="utf-8"))
     defaults = {item["name"]: item["default_model"] for item in providers}
 
+    assert set(defaults) == set(EXPECTED_PROVIDER_DEFAULTS)
     for provider, model in EXPECTED_PROVIDER_DEFAULTS.items():
         assert defaults[provider] == model
 
@@ -74,10 +79,10 @@ def test_interactive_onboard_openai_defaults_to_available_model() -> None:
 def test_interactive_onboard_codex_defaults_to_supported_model() -> None:
     provider = next(provider for provider in ONBOARD_PROVIDERS if provider.key == "openai-codex")
 
-    assert provider.default_model == "openai-codex/gpt-5.4"
+    assert provider.default_model == "openai-codex/gpt-6-sol"
     assert provider.key_env is None
     assert provider.base_env == "OPENAI_CODEX_BASE_URL"
-    assert provider.suggested_models[0] == "openai-codex/gpt-5.4"
+    assert provider.suggested_models[0] == "openai-codex/gpt-6-sol"
 
 
 def test_legacy_cli_provider_choices_match_registry_defaults() -> None:
@@ -99,7 +104,7 @@ def test_interactive_onboard_suggests_current_primary_models() -> None:
     assert onboard_defaults["openrouter"] == "deepseek/deepseek-v4-pro"
     assert onboard_defaults["openai"] == "gpt-5.5"
     assert onboard_defaults["anthropic"] == "claude-sonnet-4-6"
-    assert onboard_defaults["openai-codex"] == "openai-codex/gpt-5.4"
+    assert onboard_defaults["openai-codex"] == "openai-codex/gpt-6-sol"
     assert onboard_defaults["deepseek"] == "deepseek-v4-pro"
     assert onboard_defaults["siliconflow-cn"] == "deepseek-ai/DeepSeek-V3.1-Terminus"
     assert onboard_defaults["siliconflow-global"] == "deepseek-ai/DeepSeek-V3.1-Terminus"
@@ -172,8 +177,70 @@ def test_credential_fallback_map_matches_provider_catalog() -> None:
     providers_path = (
         Path(__file__).resolve().parents[1] / "src" / "providers" / "llm_providers.json"
     )
+    # claude-cli drives a local executable and has no HTTP endpoint, so it is
+    # the one provider deliberately left out of the fallback map.
     catalog = {
         item["name"]: item["default_base_url"]
         for item in json.loads(providers_path.read_text(encoding="utf-8"))
+        if item.get("auth_type") != "claude_cli"
     }
     assert _provider_default_base_urls() == catalog
+
+
+def test_env_example_default_matches_provider_registry():
+    agent_root = Path(__file__).resolve().parents[1]
+    assignments = dict(line.split("=", 1) for line in
+                       (agent_root / ".env.example").read_text().splitlines()
+                       if line.startswith(("LANGCHAIN_PROVIDER=", "LANGCHAIN_MODEL_NAME=")))
+    providers = json.loads((agent_root / "src/providers/llm_providers.json").read_text())
+    provider = next(p for p in providers if p["name"] == assignments["LANGCHAIN_PROVIDER"])
+    assert assignments["LANGCHAIN_MODEL_NAME"] == provider["default_model"]
+
+
+def test_direct_deepseek_suggests_current_flash_name():
+    provider = next(p for p in ONBOARD_PROVIDERS if p.key == "deepseek")
+    assert "deepseek-flash" in provider.suggested_models
+    assert "deepseek-v4-flash" not in provider.suggested_models
+
+
+def test_codex_models_offered_are_ones_the_codex_backend_publishes() -> None:
+    """Every Codex model we default to or suggest is in the published list.
+
+    ``openai-codex/gpt-5.4`` was the default and the Codex backend answers it
+    with 400 "not supported when using Codex with a ChatGPT account"; its
+    ``-mini`` sibling was suggested beside it. ``context_windows.json`` holds
+    the models the Codex backend lists (with their source), so a default
+    outside that pattern is a model nobody verified.
+    """
+    import json
+    import re
+    from pathlib import Path
+
+    catalog = json.loads(
+        (Path(__file__).resolve().parents[1] / "src" / "providers" / "context_windows.json").read_text()
+    )
+    patterns = [e["pattern"] for e in catalog["models"] if e.get("provider") == "openai-codex"]
+    onboard = next(provider for provider in ONBOARD_PROVIDERS if provider.key == "openai-codex")
+    offered = {EXPECTED_PROVIDER_DEFAULTS["openai-codex"], onboard.default_model, *onboard.suggested_models}
+    for model in offered:
+        assert any(re.search(pattern, model) for pattern in patterns), model
+
+
+def test_openrouter_suggests_current_flash_without_switching_default():
+    provider = next(p for p in ONBOARD_PROVIDERS if p.key == "openrouter")
+    assert provider.default_model == "deepseek/deepseek-v4-pro"
+    assert "deepseek/deepseek-v4.1-flash" in provider.suggested_models
+    assert "deepseek/deepseek-v4-flash" not in provider.suggested_models
+
+
+def test_documented_direct_deepseek_pair_matches_registry():
+    import re
+
+    text = (Path(__file__).resolve().parents[1] / ".env.example").read_text()
+    headers = list(re.finditer(r"(?m)^# --- DeepSeek ---.*$", text))
+    assert len(headers) == 1
+    block = re.split(r"(?m)^# --- ", text[headers[0].end():], maxsplit=1)[0]
+    providers = re.findall(r"(?m)^#\s*LANGCHAIN_PROVIDER=(\S+)", block)
+    models = re.findall(r"(?m)^#\s*LANGCHAIN_MODEL_NAME=(\S+)", block)
+    assert providers == ["deepseek"]
+    assert models == [EXPECTED_PROVIDER_DEFAULTS["deepseek"]]

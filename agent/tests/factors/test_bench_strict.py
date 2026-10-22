@@ -235,7 +235,7 @@ def _stub_panel(monkeypatch: pytest.MonkeyPatch, n_rows: int = 80, n_cols: int =
         lambda universe, period: panel,  # noqa: ARG005
     )
 
-    def _fwd(panel_in: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    def _fwd(panel_in: dict[str, pd.DataFrame], horizon: int = 1) -> pd.DataFrame:
         c = panel_in["close"]
         return c.pct_change().shift(-1)
 
@@ -293,6 +293,63 @@ def test_run_bench_strict_respects_oos_split(
     for row in result["rows"]:
         assert row["alpha_t_train"] is not None
         assert row["alpha_t_test"] is not None
+
+
+def test_run_bench_strict_places_oos_after_training_cutoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_panel(monkeypatch, n_rows=120)
+    result = run_bench_strict(
+        zoo="alpha101",
+        universe="csi300",
+        period="2024-2024",
+        random_control=True,
+        n_random_seeds=2,
+        training_cutoff="2024-03-01",
+        registry=_StubRegistry(panel={}),
+    )
+
+    assert result["status"] == "ok"
+    assert result["training_cutoff"] == "2024-03-01"
+    assert result["oos_split"] == "2024-03-01"
+    assert all(row["ic_count_test"] >= 2 for row in result["rows"])
+
+
+
+@pytest.mark.parametrize("boundary", ["training_cutoff", "oos_split"])
+def test_oos_boundary_with_no_usable_alpha_rows_returns_error(
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+) -> None:
+    _stub_panel(monkeypatch, n_rows=80)
+    result = run_bench_strict(
+        zoo="alpha101",
+        universe="csi300",
+        period="2024-2024",
+        random_control=False,
+        registry=_StubRegistry(panel={}),
+        **{boundary: "2024-03-19"},
+    )
+
+    assert result["status"] == "error"
+    assert result["n_alphas_tested"] == 0
+    assert result["n_skipped"] > 0
+    assert "no valid alpha rows" in result["error"]
+
+
+def test_run_bench_strict_rejects_two_oos_boundaries() -> None:
+    result = run_bench_strict(
+        zoo="alpha101",
+        universe="csi300",
+        period="2024-2024",
+        random_control=True,
+        oos_split="2024-03-01",
+        training_cutoff="2024-04-01",
+        registry=_StubRegistry(panel={}),
+    )
+
+    assert result["status"] == "error"
+    assert "either training_cutoff or oos_split" in result["error"]
 
 
 def test_run_bench_strict_random_control_is_keyword_only() -> None:
@@ -556,7 +613,7 @@ def test_run_bench_strict_catches_planted_alive_signal(
     )
     monkeypatch.setattr(
         "src.factors.bench_runner_strict._compute_forward_returns",
-        lambda p: p["close"].pct_change().shift(-1),
+        lambda p, horizon=1: p["close"].pct_change().shift(-1),
     )
 
     class PlantedReg:
@@ -594,7 +651,7 @@ def test_run_bench_strict_catches_planted_reversed_signal(
     )
     monkeypatch.setattr(
         "src.factors.bench_runner_strict._compute_forward_returns",
-        lambda p: p["close"].pct_change().shift(-1),
+        lambda p, horizon=1: p["close"].pct_change().shift(-1),
     )
 
     class ReversedReg:
@@ -619,3 +676,46 @@ def test_run_bench_strict_catches_planted_reversed_signal(
         f"inverted momentum should be reversed_strict, got result={result}"
     )
     assert result["reversed"] == 1  # legacy alias
+
+
+def test_run_bench_strict_rejects_oos_split_outside_loaded_sample(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_panel(monkeypatch, n_rows=80)
+    reg = _StubRegistry(panel={})
+    for split in ("2023-12-31", "2025-01-01"):
+        result = run_bench_strict(
+            zoo="alpha101", universe="csi300", period="2024-2024",
+            random_control=True, oos_split=split, registry=reg,
+        )
+        assert result["status"] == "error"
+        assert "must fall within the loaded sample" in result["error"]
+
+
+@pytest.mark.parametrize("split", ["2024-03-19", "2024-01-01"])
+def test_an_oos_split_inside_the_prices_but_outside_the_ic_skips_the_alpha(
+    monkeypatch: pytest.MonkeyPatch, split: str
+) -> None:
+    # Prices run 2024-01-01..03-20 and the forward return drops the last bar, so
+    # 03-19 leaves 0 test IC observations and 01-01 leaves 1 train observation.
+    # Both pass the sample-range check; t_stat read the empty side as 0.0 and the
+    # alpha was still given a category.
+    _stub_panel(monkeypatch, n_rows=80)
+    result = run_bench_strict(
+        zoo="alpha101", universe="csi300", period="2024-2024",
+        random_control=False, oos_split=split, registry=_StubRegistry(panel={}),
+    )
+    assert result["n_alphas_tested"] == 0
+    assert {s["kind"] for s in result["skipped"]} == {"typed"}
+    assert all("each side needs 2" in s["reason"] for s in result["skipped"])
+
+
+def test_an_oos_split_leaving_two_ic_observations_is_still_measured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The other side of the guard above: 03-17 leaves exactly 03-18 and 03-19.
+    _stub_panel(monkeypatch, n_rows=80)
+    result = run_bench_strict(
+        zoo="alpha101", universe="csi300", period="2024-2024",
+        random_control=False, oos_split="2024-03-17", registry=_StubRegistry(panel={}),
+    )
+    assert result["n_alphas_tested"] == 2
+    assert {row["ic_count_test"] for row in result["rows"]} == {2}

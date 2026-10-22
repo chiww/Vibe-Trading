@@ -84,7 +84,7 @@ def test_agent_loop_executes_dsml_textual_tool_call(
             return None
 
     monkeypatch.setattr(
-        "src.agent.loop.HeartbeatTimer", _ImmediateHeartbeatTimer
+        "src.agent.tool_lifecycle.HeartbeatTimer", _ImmediateHeartbeatTimer
     )
     dsml = (
         '<｜｜DSML｜｜tool_calls>'
@@ -155,7 +155,7 @@ def test_agent_loop_never_releases_tool_call_syntax_as_a_final_answer(
             return None
 
     monkeypatch.setattr(
-        "src.agent.loop.HeartbeatTimer", _ImmediateHeartbeatTimer
+        "src.agent.tool_lifecycle.HeartbeatTimer", _ImmediateHeartbeatTimer
     )
     # The fullwidth-vbar (U+FF5C) form is what the real failure looked like; the
     # streaming DSML parser does not recognize it, so it arrives as text.
@@ -181,3 +181,23 @@ def test_agent_loop_never_releases_tool_call_syntax_as_a_final_answer(
         event_type == "answer" and "<" in str(payload)
         for event_type, payload in events
     )
+
+
+def test_closing_dsml_tags_alone_are_tool_call_syntax() -> None:
+    """A DeepSeek draft once ended in closing tags only, inside its figures block;
+    the opening-tag pattern missed them and the gate got three unreadable lines."""
+    from src.agent.loop import _looks_like_tool_call_syntax
+
+    tail = "\n".join(
+        [
+            "```figures",
+            "0.3897 | observed | weight | rp",
+            "</｜｜DSML｜｜parameter>",
+            "</｜｜DSML｜｜invoke>",
+            "</｜｜DSML｜｜tool_calls>",
+        ]
+    )
+
+    assert _looks_like_tool_call_syntax("Report.\n\n" + tail)
+    assert _looks_like_tool_call_syntax("done </||DSML||invoke>")
+    assert not _looks_like_tool_call_syntax("| 标的 | 权重 |\n|---|---|\n| 000001.SZ | 38.97% |")

@@ -33,6 +33,7 @@ _TRADING_DAYS = {
     "nobitex": 365, "wallex": 365,
     # A-share equity
     "baostock": 252, "tencent": 252, "eastmoney": 252, "sina": 252,
+    "gildata": 252,
     # US / international equity
     "yahoo": 252, "finnhub": 252, "alphavantage": 252, "tiingo": 252,
     "fmp": 252, "stooq": 252, "longbridge": 252,
@@ -43,6 +44,8 @@ _TRADING_DAYS = {
     "india_broker": 252,
     # Korean equity (KRX)
     "pykrx": 252,
+    # Brazilian equity (B3)
+    "b3_cotahist": 252,
 }
 # mt5 is a forex/CFD feed: 24x5 sessions → 260 trading days, 24h intraday bars.
 # US equity (yfinance-style): 6.5h sessions → 390 1m bars/day.
@@ -59,7 +62,7 @@ _BARS_PER_DAY = {
             "tiingo": 390, "fmp": 390, "stooq": 390, "longbridge": 390,
             "local": 390, "qveris": 390,
             # A-share equity (4.0h session)
-            "tushare": 240, "akshare": 240, "baostock": 240, "tencent": 240,
+            "tushare": 240, "gildata": 240, "akshare": 240, "baostock": 240, "tencent": 240,
             "eastmoney": 240, "sina": 240, "mootdx": 240, "futu": 240,
             # crypto (24h)
             "okx": 1440, "ccxt": 1440, "binance": 1440,
@@ -70,72 +73,86 @@ _BARS_PER_DAY = {
             "india_broker": 375,
             # Korean equity (6.5h session, 09:00-15:30 KST)
             "pykrx": 390,
+            # Brazilian equity (B3, 7h session 10:00-17:00 BRT; daily-only loader)
+            "b3_cotahist": 420,
             },
     "5m":  {"yfinance": 78,  "yahoo": 78,  "finnhub": 78,  "alphavantage": 78,
             "tiingo": 78,  "fmp": 78,  "stooq": 78,  "longbridge": 78,
             "local": 78, "qveris": 78,
-            "tushare": 48,  "akshare": 48,  "baostock": 48,  "tencent": 48,
+            "tushare": 48, "gildata": 48,  "akshare": 48,  "baostock": 48,  "tencent": 48,
             "eastmoney": 48,  "sina": 48,  "mootdx": 48,  "futu": 48,
             "okx": 288,  "ccxt": 288,  "binance": 288,
             "nobitex": 288,  "wallex": 288,
             "mt5": 288, "tickerall": 288,
             "india_broker": 75,
             "pykrx": 78,
+            # Brazilian equity (B3, 7h session 10:00-17:00 BRT; daily-only loader)
+            "b3_cotahist": 84,
             },
     "15m": {"yfinance": 26,  "yahoo": 26,  "finnhub": 26,  "alphavantage": 26,
             "tiingo": 26,  "fmp": 26,  "stooq": 26,  "longbridge": 26,
             "local": 26, "qveris": 26,
-            "tushare": 16,  "akshare": 16,  "baostock": 16,  "tencent": 16,
+            "tushare": 16, "gildata": 16,  "akshare": 16,  "baostock": 16,  "tencent": 16,
             "eastmoney": 16,  "sina": 16,  "mootdx": 16,  "futu": 16,
             "okx": 96,   "ccxt": 96,   "binance": 96,
             "nobitex": 96,   "wallex": 96,
             "mt5": 96, "tickerall": 96,
             "india_broker": 25,
             "pykrx": 26,
+            # Brazilian equity (B3, 7h session 10:00-17:00 BRT; daily-only loader)
+            "b3_cotahist": 28,
             },
     "30m": {"yfinance": 13,  "yahoo": 13,  "finnhub": 13,  "alphavantage": 13,
             "tiingo": 13,  "fmp": 13,  "stooq": 13,  "longbridge": 13,
             "local": 13, "qveris": 13,
-            "tushare": 8,   "akshare": 8,   "baostock": 8,   "tencent": 8,
+            "tushare": 8, "gildata": 8,   "akshare": 8,   "baostock": 8,   "tencent": 8,
             "eastmoney": 8,   "sina": 8,   "mootdx": 8,   "futu": 8,
             "okx": 48,   "ccxt": 48,   "binance": 48,
             "nobitex": 48,   "wallex": 48,
             "mt5": 48, "tickerall": 48,
             "india_broker": 13,
             "pykrx": 13,
+            # Brazilian equity (B3, 7h session 10:00-17:00 BRT; daily-only loader)
+            "b3_cotahist": 14,
             },
     "1H":  {"yfinance": 7,   "yahoo": 7,   "finnhub": 7,   "alphavantage": 7,
             "tiingo": 7,   "fmp": 7,   "stooq": 7,   "longbridge": 7,
             "local": 7, "qveris": 7,
-            "tushare": 4,   "akshare": 4,   "baostock": 4,   "tencent": 4,
+            "tushare": 4, "gildata": 4,   "akshare": 4,   "baostock": 4,   "tencent": 4,
             "eastmoney": 4,   "sina": 4,   "mootdx": 4,   "futu": 4,
             "okx": 24,   "ccxt": 24,   "binance": 24,
             "nobitex": 24,   "wallex": 24,
             "mt5": 24, "tickerall": 24,
             "india_broker": 7,
             "pykrx": 7,
+            # Brazilian equity (B3, 7h session 10:00-17:00 BRT; daily-only loader)
+            "b3_cotahist": 7,
             },
     "4H":  {"yfinance": 2,   "yahoo": 2,   "finnhub": 2,   "alphavantage": 2,
             "tiingo": 2,   "fmp": 2,   "stooq": 2,   "longbridge": 2,
             "local": 2, "qveris": 2,
-            "tushare": 1,   "akshare": 1,   "baostock": 1,   "tencent": 1,
+            "tushare": 1,   "gildata": 1,  "akshare": 1,   "baostock": 1,   "tencent": 1,
             "eastmoney": 1,   "sina": 1,   "mootdx": 1,   "futu": 1,
             "okx": 6,    "ccxt": 6,    "binance": 6,
             "nobitex": 6,    "wallex": 6,
             "mt5": 6, "tickerall": 6,
             "india_broker": 2,
             "pykrx": 2,
+            # Brazilian equity (B3, 7h session 10:00-17:00 BRT; daily-only loader)
+            "b3_cotahist": 2,
             },
     "1D":  {"yfinance": 1,   "yahoo": 1,   "finnhub": 1,   "alphavantage": 1,
             "tiingo": 1,   "fmp": 1,   "stooq": 1,   "longbridge": 1,
             "local": 1, "qveris": 1,
-            "tushare": 1,   "akshare": 1,   "baostock": 1,   "tencent": 1,
+            "tushare": 1,   "gildata": 1,  "akshare": 1,   "baostock": 1,   "tencent": 1,
             "eastmoney": 1,   "sina": 1,   "mootdx": 1,   "futu": 1,
             "okx": 1,    "ccxt": 1,    "binance": 1,
             "nobitex": 1,    "wallex": 1,
             "mt5": 1, "tickerall": 1,
             "india_broker": 1,
             "pykrx": 1,
+            # Brazilian equity (B3, 7h session 10:00-17:00 BRT; daily-only loader)
+            "b3_cotahist": 1,
             },
 }
 
@@ -146,6 +163,10 @@ _TRADING_DAYS["tdxtap"] = _TRADING_DAYS["local"]
 for _row in _BARS_PER_DAY.values():
     _row["tdxtap"] = _row["local"]
 
+# Weekly and monthly bars count calendar periods, whatever the market's
+# trading days: every week and every month holds one bar (#1479).
+_CALENDAR_BARS_PER_YEAR = {"1W": 52, "1M": 12}
+
 # Runner/loaders also emit these aliases; map them onto the table keys above.
 _SOURCE_ALIASES = {"yahoo": "yfinance", "binance": "ccxt"}
 
@@ -155,10 +176,15 @@ def _normalize_interval(interval: str) -> str:
 
     Minute bars stay lowercase (``1m``); hour/day use the uppercase keys the
     table already stores (``1H`` / ``4H`` / ``1D``). Loaders accept both cases
-    after the interval-map fixes; annualisation must too.
+    after the interval-map fixes; annualisation must too. ``1M`` is a month and
+    is matched before the case fold, which would read it as a minute (#1479).
     """
     token = str(interval or "1D").strip()
+    if token == "1M":
+        return token
     lower = token.lower()
+    if lower == "1w":
+        return "1W"
     if lower in ("1m", "5m", "15m", "30m"):
         return lower
     if lower in ("1h", "4h", "1d"):
@@ -170,8 +196,9 @@ def calc_bars_per_year(interval: str = "1D", source: str = "tushare") -> int:
     """Number of bars per year for annualisation.
 
     Args:
-        interval: Bar size (1m / 5m / 15m / 30m / 1H / 4H / 1D), case-insensitive
-            like loaders accept (``1h`` → ``1H``, ``4h`` → ``4H``, ``1d`` → ``1D``).
+        interval: Bar size (1m / 5m / 15m / 30m / 1H / 4H / 1D / 1W / 1M),
+            case-insensitive like loaders accept (``1h`` → ``1H``, ``4h`` →
+            ``4H``, ``1d`` → ``1D``) except ``1M``, which is a month.
         source: Data source (any VALID_SOURCES entry). Defaults to 252 days, 1 bar/day
             when source is missing from the table.
 
@@ -179,6 +206,8 @@ def calc_bars_per_year(interval: str = "1D", source: str = "tushare") -> int:
         Bars per year.
     """
     interval_key = _normalize_interval(interval)
+    if interval_key in _CALENDAR_BARS_PER_YEAR:
+        return _CALENDAR_BARS_PER_YEAR[interval_key]
     source_key = str(source or "").strip().lower()
     source_key = _SOURCE_ALIASES.get(source_key, source_key)
     trading_days = _TRADING_DAYS.get(source_key, 252)
@@ -312,7 +341,7 @@ def buy_and_hold_return(close: Any) -> Optional[float]:
     return last / first - 1.0
 
 
-def win_rate_and_stats(trades: List[TradeRecord]) -> Dict[str, float]:
+def win_rate_and_stats(trades: List[TradeRecord]) -> Dict[str, Optional[float]]:
     """Win rate and P&L statistics from completed trades.
 
     Args:
@@ -320,7 +349,9 @@ def win_rate_and_stats(trades: List[TradeRecord]) -> Dict[str, float]:
 
     Returns:
         Dict with win_rate, profit_loss_ratio, max_consecutive_loss,
-        avg_holding_bars, profit_factor.
+        avg_holding_bars, profit_factor. profit_loss_ratio and profit_factor
+        are ``None`` when no trade lost, since both divide by the losses.
+        Average holding bars includes valid zero-duration completed trades.
     """
     if not trades:
         return {
@@ -336,13 +367,16 @@ def win_rate_and_stats(trades: List[TradeRecord]) -> Dict[str, float]:
 
     win_rate = len(wins) / len(trades)
 
+    # With no losing trade both ratios have no denominator. 0.0 would read as
+    # "no profit at all" and rank a run that never lost below every other run,
+    # so they are None: an empty metrics.csv cell and null in JSON.
     avg_win = float(np.mean(wins)) if wins else 0.0
-    avg_loss = abs(float(np.mean(losses))) if losses else 1e-10
-    profit_loss_ratio = avg_win / avg_loss if avg_loss > 1e-10 else 0.0
+    avg_loss = abs(float(np.mean(losses))) if losses else 0.0
+    profit_loss_ratio = avg_win / avg_loss if avg_loss > 1e-10 else None
 
     gross_profit = sum(wins) if wins else 0.0
-    gross_loss = abs(sum(losses)) if losses else 1e-10
-    profit_factor = gross_profit / gross_loss if gross_loss > 1e-10 else 0.0
+    gross_loss = abs(sum(losses)) if losses else 0.0
+    profit_factor = gross_profit / gross_loss if gross_loss > 1e-10 else None
 
     max_consec = 0
     cur_consec = 0
@@ -353,15 +387,19 @@ def win_rate_and_stats(trades: List[TradeRecord]) -> Dict[str, float]:
         else:
             cur_consec = 0
 
-    hold_bars = [t.holding_bars for t in trades if t.holding_bars > 0]
+    # A completed same-bar trade has a valid zero duration and still counts
+    # in the per-trade average. Keep excluding invalid negative durations.
+    hold_bars = [t.holding_bars for t in trades if t.holding_bars >= 0]
     avg_holding = float(np.mean(hold_bars)) if hold_bars else 0.0
 
     return {
         "win_rate": win_rate,
-        "profit_loss_ratio": round(profit_loss_ratio, 4),
+        "profit_loss_ratio": (
+            round(profit_loss_ratio, 4) if profit_loss_ratio is not None else None
+        ),
         "max_consecutive_loss": max_consec,
         "avg_holding_bars": round(avg_holding, 1),
-        "profit_factor": round(profit_factor, 4),
+        "profit_factor": round(profit_factor, 4) if profit_factor is not None else None,
     }
 
 
@@ -507,6 +545,22 @@ def calc_fill_turnover_series(
     return (traded_margin / denominator).replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
 
+def period_returns(equity_curve: pd.Series, initial_cash: float) -> pd.Series:
+    """Per-bar returns seeded with the pre-first-bar cash mark.
+
+    The account holds ``initial_cash`` before the first recorded bar, so the
+    first return measures that bar's fill from cash rather than starting the
+    series at a hard zero. ``prod(1 + r) - 1`` then reproduces
+    ``equity[-1] / initial_cash - 1`` exactly, which is what ``total_return``
+    and the drawdown path already assume. When the first bar carries no fill
+    (equity == cash) the seed is 0 and the series matches a plain pct_change.
+    """
+    ret = equity_curve.pct_change(fill_method=None)
+    if len(ret) and np.isfinite(initial_cash) and initial_cash > 0:
+        ret.iloc[0] = equity_curve.iloc[0] / float(initial_cash) - 1.0
+    return ret
+
+
 def calc_metrics(
     equity_curve: pd.Series,
     trades: List[TradeRecord],
@@ -544,7 +598,7 @@ def calc_metrics(
     else:
         bpy = bars_per_year
 
-    port_ret = equity_curve.pct_change().fillna(0.0)
+    port_ret = period_returns(equity_curve, initial_cash).fillna(0.0)
     # Equity that touches zero then recovers (100 → 0 → 50) yields non-finite
     # pct_change values; options metrics already skip risk ratios in that case.
     returns_finite = bool(np.isfinite(port_ret.to_numpy(dtype=float, copy=False)).all())
@@ -568,7 +622,7 @@ def calc_metrics(
             ann_ret = float("inf")
     # ``Series.std()`` uses ddof=1, so a single-observation return series
     # (e.g. a one-bar backtest) yields NaN and poisons the Sharpe ratio.
-    # Guard the small sample the same way ``downside_std`` is guarded below.
+    # Guard the small sample before calculating volatility.
     vol = float(port_ret.std()) if len(port_ret) > 1 and returns_finite else 0.0
     sharpe = (
         float(port_ret.mean() / (vol + 1e-10) * np.sqrt(bpy))
@@ -588,12 +642,18 @@ def calc_metrics(
     max_dd = float(dd.min())
 
     calmar = ann_ret / abs(max_dd) if abs(max_dd) > 1e-10 else 0.0
+    if not np.isfinite(calmar):
+        calmar = 0.0
 
-    # Sortino
+    # Sortino: zero-target downside RMS, with all return periods in the divisor.
     if returns_finite:
         downside = port_ret[port_ret < 0]
-        downside_std = float(downside.std()) if len(downside) > 1 else 1e-10
-        sortino = float(port_ret.mean() / (downside_std + 1e-10) * np.sqrt(bpy))
+        downside_deviation = (
+            float(np.sqrt((downside**2).sum() / len(port_ret)))
+            if len(downside) > 0
+            else 1e-10  # Preserve the existing no-downside fallback.
+        )
+        sortino = float(port_ret.mean() / (downside_deviation + 1e-10) * np.sqrt(bpy))
     else:
         sortino = 0.0
     if not np.isfinite(sortino):
@@ -624,7 +684,7 @@ def calc_metrics(
         excess = total_ret - bench_return
         aligned_bench = bench_ret.reindex(port_ret.index).fillna(0.0)
         active_ret = port_ret - aligned_bench
-        # Same ddof=1 small-sample guard as ``vol`` / ``downside_std`` so the
+        # Same ddof=1 small-sample guard as ``vol`` so the
         # information ratio stays finite for a single-observation series.
         active_std = float(active_ret.std()) if len(active_ret) > 1 and returns_finite else 0.0
         ir = (

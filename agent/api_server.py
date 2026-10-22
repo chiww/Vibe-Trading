@@ -114,13 +114,14 @@ from src.api.state import (  # noqa: F401, E402
 console = Console()
 logger = logging.getLogger(__name__)
 
-from src.api.channels_routes import (  # noqa: E402
+from src.api.channels_routes import (  # noqa: F401, E402
     _start_channel_runtime,
     _stop_channel_runtime,
 )
-from src.api.scheduled_routes import (  # noqa: E402
+from src.api.scheduled_routes import (  # noqa: F401, E402
     _start_scheduled_research_executor,
     _stop_scheduled_research_executor,
+    _stop_scheduled_research_on_shutdown,
 )
 
 
@@ -135,19 +136,16 @@ async def _run_startup_preflight() -> None:
     except Exception:  # pragma: no cover — best-effort
         logging.getLogger(__name__).warning("Legacy state migration failed", exc_info=True)
     run_preflight(console)
+    # Sole scheduler start point (single-writer invariant, scheduler-unification
+    # T12): this lifespan call is the only production site that starts the
+    # scheduled-research kernel, exactly once per process, and it seeds the
+    # protected system jobs into the store before the first tick can run
+    # (order + flag-off early-return documented on the callee).
     _start_scheduled_research_executor()
     from src.config.accessor import get_env_config
 
     if get_env_config().agent_tuning.vibe_trading_channels_auto_start:
         await _start_channel_runtime()
-
-
-async def _stop_scheduled_research_on_shutdown() -> None:
-    """Stop the scheduled research executor on server shutdown."""
-    try:
-        await _stop_channel_runtime()
-    finally:
-        await _stop_scheduled_research_executor()
 
 
 @asynccontextmanager
@@ -188,11 +186,7 @@ app.middleware("http")(_apply_security_headers)
 from src.api.runs_routes import register_runs_routes  # noqa: E402
 register_runs_routes(app)
 
-from src.api.runs_routes import (  # noqa: F401, E402
-    _load_json_file,
-    _load_csv_to_dict,
-    _build_response_from_run_dir,
-)
+from src.api.runs_routes import _build_response_from_run_dir  # noqa: F401, E402
 from src.api.attribution_routes import register_attribution_routes  # noqa: E402
 register_attribution_routes(app)
 
@@ -222,6 +216,14 @@ from src.api.settings_routes import (  # noqa: F401, E402
     _load_llm_providers,
 )
 
+from src.api.custom_provider_routes import register_custom_provider_routes  # noqa: E402
+register_custom_provider_routes(app, require_local_or_auth, require_settings_write_auth)
+
+from src.api.pixel_office_routes import register_pixel_office_routes  # noqa: E402
+register_pixel_office_routes(app, require_local_or_auth, require_settings_write_auth)
+from src.api.strategy_adaptation_routes import register_strategy_adaptation_routes  # noqa: E402
+register_strategy_adaptation_routes(app, require_settings_write_auth)
+
 # --- Uploads ---
 from src.api.uploads_routes import register_uploads_routes  # noqa: E402
 register_uploads_routes(app)
@@ -237,6 +239,8 @@ from src.api.uploads_routes import (  # noqa: F401, E402
 # --- Channels ---
 from src.api.channels_routes import register_channels_routes  # noqa: E402
 register_channels_routes(app)
+from src.api.channels_config_routes import register_channels_config_routes  # noqa: E402
+register_channels_config_routes(app)
 from src.api.qveris_routes import qveris_router  # noqa: E402  # QVERIS-INTEGRATION
 app.include_router(qveris_router)  # QVERIS-INTEGRATION
 
@@ -257,6 +261,8 @@ register_live_routes(app)
 # --- Read-only portfolio dashboard ---
 from src.api.portfolio_routes import register_portfolio_routes  # noqa: E402
 register_portfolio_routes(app)
+from src.api.paper_trade_routes import register_paper_trade_routes  # noqa: E402
+register_paper_trade_routes(app)
 
 from src.api.connection_routes import register_connection_routes  # noqa: E402
 register_connection_routes(app)
@@ -286,6 +292,7 @@ from src.api.live_routes import (  # noqa: F401, E402
     _live_broker_adapter,
     _build_live_runner,
     _drive_runner,
+    _stop_live_runners,
     _connector_verify_cache,
     _check_connector_status,
 )
@@ -328,68 +335,10 @@ from src.api.scheduled_routes import (  # noqa: E402, F401
 # ============================================================================
 
 def serve_main(argv: list[str] | None = None) -> int:
-    """Start the API server from CLI-style arguments."""
-    import argparse
-    import subprocess
-    import uvicorn
-    from src.api.spa import SPAStaticFiles
+    """Start the API server, preserving the module's public CLI entry point."""
+    from src.api.server_cli import serve
 
-    parser = argparse.ArgumentParser(description="Vibe-Trading Server")
-    parser.add_argument("--port", type=int, default=8000, help="Listen port (default 8000)")
-    parser.add_argument("--host", default="127.0.0.1", help="Bind address")
-    parser.add_argument("--dev", action="store_true", help="Dev mode: spawn Vite on :5173")
-    try:
-        args = parser.parse_args(argv)
-    except SystemExit as exc:
-        return int(exc.code) if isinstance(exc.code, int) else 2
-
-    if not _is_loopback_bind_host(args.host) and not _configured_api_key():
-        print(
-            f"[warn] Binding to {args.host} without API_AUTH_KEY set. "
-            f"Remote requests are rejected by the loopback peer-IP check, "
-            f"but consider using --host 127.0.0.1 for local-only access."
-        )
-
-    frontend_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
-    frontend_root = Path(__file__).resolve().parent.parent / "frontend"
-
-    vite_proc = None
-    if args.dev and frontend_root.exists():
-        print("[dev] Starting Vite dev server on :5173 ...")
-        vite_proc = subprocess.Popen(
-            ["npx", "vite", "--host", "0.0.0.0"],
-            cwd=str(frontend_root),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        print(f"[dev] Vite PID={vite_proc.pid}")
-        print("[dev] Frontend: http://localhost:5173")
-        print(f"[dev] API: http://localhost:{args.port}")
-    elif frontend_dist.exists():
-        if not any(getattr(route, "path", None) == "/" for route in app.routes):
-            app.mount("/", SPAStaticFiles(directory=str(frontend_dist), html=True), name="frontend")
-        print(f"[prod] Frontend served from {frontend_dist}")
-    else:
-        print(f"[warn] No frontend build found at {frontend_dist}")
-        print("[warn] Run: cd frontend && npm run build")
-
-    print("=" * 50)
-    print("  Vibe-Trading Server")
-    print(f"  http://127.0.0.1:{args.port}")
-    print("=" * 50)
-
-    # Redact api_key=/ticket= values from Uvicorn's access log (it logs the full
-    # request line including the query string). Installed before run() so the
-    # filter is attached when Uvicorn configures its loggers.
-    install_access_log_redaction_filter()
-
-    try:
-        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
-    finally:
-        if vite_proc:
-            vite_proc.terminate()
-            print("[dev] Vite stopped")
-    return 0
+    return serve(app, argv, repo_root=Path(__file__).resolve().parent.parent)
 
 
 if __name__ == "__main__":

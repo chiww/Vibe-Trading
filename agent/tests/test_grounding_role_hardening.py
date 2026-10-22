@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from src.agent.grounding import GroundingLedger
+from tests.grounding_parameter_helpers import declared_parameter
 from src.agent.grounding.evidence import _metric_kind_for_path
 from src.agent.grounding.policies import _note_tokens
 
@@ -80,6 +81,12 @@ INDICATORS_A = (
     "ind",
 )
 FACTOR_A = ("factor_analysis", {"symbol": A}, {"status": "ok", "sharpe": 0.888, "win_rate": 0.573}, "fa")
+PROFILE_US = (
+    "get_stock_profile",
+    {"ticker": "AAPL.US"},
+    {"ok": True, "data": {"sections": {"key_stats": {"forwardPE": 22.920343}}}},
+    "profile_us",
+)
 
 HDR = f"{A}（akshare，CNY）最新收盘 0.666 元。"
 ROW = "0.666 | observed | close 2026-09-09 | c1"
@@ -226,16 +233,19 @@ def test_an_added_operand_must_be_observed(tmp_path: Path, prose: str, row: str)
 
 
 @pytest.mark.parametrize(
-    ("prose", "row"),
+    ("prose", "row", "parameter"),
     [
-        ("第一档 0.646 元。", "0.646 | derived | 0.666 × 0.97 | c1"),
-        ("第一档 0.646 元。", "0.646 | derived | 0.666 × (1 − 0.03) | c1"),
-        ("较高点回撤 36.8%。", "36.8% | derived | (0.666 − 1.053) / 1.053 | c1"),
-        ("中枢 0.860 元。", "0.860 | derived | (0.666 + 1.053) / 2 | c1"),
+        ("第一档 0.646 元。", "0.646 | derived | 0.666 × 0.97 | c1", "97%"),
+        ("第一档 0.646 元。", "0.646 | derived | 0.666 × (1 − 0.03) | c1", "3%"),
+        ("较高点回撤 36.8%。", "36.8% | derived | (0.666 − 1.053) / 1.053 | c1", None),
+        ("中枢 0.860 元。", "0.860 | derived | (0.666 + 1.053) / 2 | c1", "2"),
     ],
 )
-def test_observed_sums_and_free_multipliers_still_derive(tmp_path: Path, prose: str, row: str) -> None:
-    result = _ledger(tmp_path, MARKET_A).validate_final_answer(HDR + " " + prose + _block(ROW, row))
+def test_observed_sums_and_declared_multipliers_still_derive(
+    tmp_path: Path, prose: str, row: str, parameter: str | None
+) -> None:
+    chosen = declared_parameter(parameter) if parameter is not None else ""
+    result = _ledger(tmp_path, MARKET_A).validate_final_answer(HDR + chosen + " " + prose + _block(ROW, row))
 
     assert result.valid is True, result.issues
 
@@ -250,7 +260,7 @@ def test_observed_sums_and_free_multipliers_still_derive(tmp_path: Path, prose: 
 )
 def test_a_percentage_factor_and_a_return_ratio_are_not_offsets(tmp_path: Path, prose: str, row: str) -> None:
     result = _ledger(tmp_path, MARKET_B, message=f"分析 {B}").validate_final_answer(
-        HDR_B + " " + prose + _block(ROW_B, row)
+        HDR_B + declared_parameter("3%") + " " + prose + _block(ROW_B, row)
     )
 
     assert result.valid is True, result.issues
@@ -260,8 +270,8 @@ def test_a_derived_result_is_compared_at_the_prose_precision(tmp_path: Path) -> 
     """A declaration written coarser than the prose cannot widen the band."""
     ledger = _ledger(tmp_path, MARKET_A)
 
-    coarse = ledger.validate_final_answer(HDR + " 目标价 1.00 元。" + _block(ROW, "1 | derived | 0.666 × 0.9 | c1"))
-    exact = ledger.validate_final_answer(HDR + " 目标价 0.60 元。" + _block(ROW, "0.6 | derived | 0.666 × 0.9 | c1"))
+    coarse = ledger.validate_final_answer(HDR + declared_parameter("90%") + " 目标价 1.00 元。" + _block(ROW, "1 | derived | 0.666 × 0.9 | c1"))
+    exact = ledger.validate_final_answer(HDR + declared_parameter("90%") + " 目标价 0.60 元。" + _block(ROW, "0.6 | derived | 0.666 × 0.9 | c1"))
 
     assert _reasons(coarse) == ["derivation_result_mismatch"]
     assert exact.valid is True, exact.issues
@@ -351,7 +361,7 @@ def test_a_percent_is_never_a_proposed_level(tmp_path: Path, row: str) -> None:
 
 def test_the_same_percent_declared_derived_passes(tmp_path: Path) -> None:
     result = _ledger(tmp_path, MARKET_A).validate_final_answer(
-        HDR + " 建议仓位 30%。" + _block(ROW, "30% | derived | 0.666 × 0.45 | c1")
+        HDR + declared_parameter("45%") + " 建议仓位 30%。" + _block(ROW, "30% | derived | 0.666 × 0.45 | c1")
     )
 
     assert result.valid is True, result.issues
@@ -419,6 +429,46 @@ def test_a_ref_may_name_the_tool(tmp_path: Path) -> None:
 
     assert right_tool.valid is True, right_tool.issues
     assert _reasons(wrong_tool) == ["not_in_referenced_call"]
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "get_stock_profile",
+        "profile_us",
+        "profile_us::data.sections.key_stats.forwardPE",
+    ],
+)
+def test_an_explicit_symbol_may_be_resolved_from_non_price_evidence(
+    tmp_path: Path, ref: str
+) -> None:
+    """A secondary instrument need not have a quote before its own fundamentals can ground it."""
+    ledger = _ledger(tmp_path, MARKET_A, PROFILE_US)
+    result = ledger.validate_final_answer(
+        HDR
+        + "\nAAPL.US forward P/E is 22.920343."
+        + _block(ROW, f"22.920343 | observed | forward P/E | {ref}")
+    )
+
+    assert result.valid is True, result.issues
+
+
+def test_non_price_symbol_resolution_keeps_other_symbols_evidence_isolated(
+    tmp_path: Path,
+) -> None:
+    """Recognising the secondary symbol must not let its value ground the primary instrument."""
+    ledger = _ledger(tmp_path, MARKET_A, PROFILE_US)
+    result = ledger.validate_final_answer(
+        HDR
+        + f"\n{A} forward P/E is 22.920343."
+        + _block(
+            ROW,
+            "22.920343 | observed | forward P/E | "
+            "profile_us::data.sections.key_stats.forwardPE",
+        )
+    )
+
+    assert _reasons(result) == ["not_in_referenced_call"]
 
 
 def test_a_symbol_the_declaration_names_outranks_the_prose(tmp_path: Path) -> None:
@@ -544,6 +594,308 @@ def test_a_tail_risk_figure_a_tool_returned_is_grounded(tmp_path: Path) -> None:
     assert invented.valid is False
 
 
+#: portfolio_risk_xray's tail-risk block, keys as backtest/risk_xray.py writes them.
+XRAY = (
+    "portfolio_risk_xray",
+    {"symbols": [A]},
+    {
+        "status": "ok",
+        "data": {
+            "tail_risk": {
+                "var_95": 0.0157,
+                "expected_shortfall_95": 0.0211,
+                "var_99": 0.0263,
+                "expected_shortfall_99": 0.0342,
+            }
+        },
+    },
+    "x1",
+)
+
+
+def _historical_var(confidence: float, call_id: str) -> tuple[tuple[str, dict[str, Any], str, str], float]:
+    """A real quantlib_call historical_var envelope and the VaR it returned."""
+    from src.tools.quantlib_tool import QuantlibCallTool
+
+    returns = [round(0.0005 + 0.012 * ((i * 37) % 101 - 50) / 50, 5) for i in range(250)]
+    arguments = {"action": "call", "module": "risk", "function": "historical_var", "kwargs": {"returns": returns, "confidence": confidence}}
+    payload = QuantlibCallTool().execute(**arguments)
+    return ("quantlib_call", arguments, payload, call_id), float(json.loads(payload)["result"])
+
+
+def _pct(value: float) -> str:
+    return f"{abs(value) * 100:.2f}%"
+
+
+@pytest.mark.parametrize("ref", ["data.tail_risk.var_95", "tail_risk.var_95", "var_95"])
+def test_a_tail_risk_ref_grounds_its_own_value(tmp_path: Path, ref: str) -> None:
+    result = _ledger(tmp_path, MARKET_A, XRAY).validate_final_answer(
+        HDR + " VaR 95%: 1.57%。" + _block(ROW, "95% | count | confidence", f"1.57% | observed | VaR 95% | {ref}")
+    )
+    assert result.valid is True, result.issues
+
+
+#: One tail-risk identity in the whole session: nothing to choose between.
+XRAY_ONE = (
+    "portfolio_risk_xray",
+    {"symbols": [A]},
+    {"status": "ok", "data": {"tail_risk": {"var_95": 0.0157}}},
+    "x1",
+)
+
+
+def test_a_call_scoped_ref_does_not_choose_a_tail_risk_identity(tmp_path: Path) -> None:
+    """#1425's remaining half: ``ref x1`` pools every tail-risk field that call
+    returned, so it cannot say whether 1.57% is the VaR 95% or the ES 95%.
+
+    This is the policy the owner decided on 2026-09-23 rather than a patch: when
+    a session holds more than one tail-risk identity, the figure has to name its
+    field. It costs a correction round on an answer that reads correctly today,
+    which is the price of the gate not reading the words "VaR 95%" beside it.
+    """
+    result = _ledger(tmp_path, MARKET_A, XRAY).validate_final_answer(
+        HDR + " VaR 95%: 1.57%。" + _block(ROW, "95% | count | confidence", "1.57% | observed | VaR 95% | x1")
+    )
+
+    assert result.valid is False
+    assert _reasons(result) == ["tail_risk_needs_field_ref"]
+    # The correction names every identity the call returned, so the model can
+    # pick one, not just the one the number happened to match.
+    assert result.issues[0]["ambiguous_sources"] == ["es_95", "es_99", "var_95", "var_99"]
+
+
+XRAY_SECOND = (
+    "portfolio_risk_xray",
+    {"symbols": [A]},
+    {
+        "status": "ok",
+        "data": {
+            "tail_risk": {
+                "var_95": 0.0195,
+                "expected_shortfall_95": 0.0268,
+                "var_99": 0.0287,
+                "expected_shortfall_99": 0.0396,
+            }
+        },
+    },
+    "x2",
+)
+
+
+def test_tool_name_before_field_ref_lists_exact_call_refs(tmp_path: Path) -> None:
+    ledger = _ledger(
+        tmp_path,
+        MARKET_A,
+        XRAY,
+        XRAY_SECOND,
+        message="Compare portfolio tail risk across two scopes.",
+    )
+    result = ledger.validate_final_answer(
+        HDR + " VaR 95%: 1.57%。"
+        + _block(
+            ROW,
+            "95% | count | confidence",
+            "1.57% | observed | VaR 95% | "
+            "portfolio_risk_xray::data.tail_risk.var_95",
+        )
+    )
+
+    assert result.valid is False
+    assert _reasons(result) == ["field_ref_needs_call_id"]
+    assert result.issues[0]["field_ref_candidates"] == [
+        "x1::data.tail_risk.var_95",
+        "x2::data.tail_risk.var_95",
+    ]
+    correction = ledger.correction_prompt(result)
+    assert "x1::data.tail_risk.var_95" in correction
+    assert "x2::data.tail_risk.var_95" in correction
+
+
+def test_tail_risk_correction_lists_exact_payload_fields(tmp_path: Path) -> None:
+    ledger = _ledger(
+        tmp_path,
+        MARKET_A,
+        XRAY,
+        XRAY_SECOND,
+        message="Compare portfolio tail risk across two scopes.",
+    )
+    result = ledger.validate_final_answer(
+        HDR + " ES 95%: 2.11%。"
+        + _block(
+            ROW,
+            "95% | count | confidence",
+            "2.11% | observed | ES 95% | portfolio_risk_xray",
+        )
+    )
+
+    assert result.valid is False
+    assert _reasons(result) == ["tail_risk_needs_field_ref"]
+    correction = ledger.correction_prompt(result)
+    assert "x1::data.tail_risk.expected_shortfall_95" in correction
+    assert "x2::data.tail_risk.expected_shortfall_95" in correction
+
+
+def test_an_undeclared_tail_risk_percent_needs_a_field_ref(tmp_path: Path) -> None:
+    """The undeclared half of the same rule: a percent a tool returned needs no
+    declaration, so it was matched against every tail-risk value in the session.
+    """
+    result = _ledger(tmp_path, MARKET_A, XRAY).validate_final_answer(HDR + " 单日 VaR 为 1.57%。")
+
+    assert result.valid is False
+    assert _reasons(result) == ["tail_risk_needs_field_ref"]
+
+
+def test_one_tail_risk_identity_still_grounds_without_a_ref(tmp_path: Path) -> None:
+    """The other side of the guard: the rule fires on ambiguity, not on tail risk.
+
+    Same claim, same prose, a session holding only ``var_95`` -- no ref needed,
+    and an invented value is still rejected.
+    """
+    grounded = _ledger(tmp_path, MARKET_A, XRAY_ONE).validate_final_answer(
+        HDR + " 单日 VaR 为 1.57%。"
+    )
+    invented = _ledger(tmp_path, MARKET_A, XRAY_ONE).validate_final_answer(
+        HDR + " 单日 VaR 为 3.10%。"
+    )
+
+    assert grounded.valid is True, grounded.issues
+    assert invented.valid is False
+
+
+def test_an_invented_value_is_a_mismatch_not_a_missing_ref(tmp_path: Path) -> None:
+    """The rule keys on the value the figure matches, not on the session merely
+    holding tail risk: 2.11% is the ES 95% and needs a ref, while 3.10% is in no
+    tail-risk field and must keep saying so -- a fabricated number told to "add a
+    ref" would send the model looking for a field that holds it."""
+    ambiguous = _ledger(tmp_path / "a", MARKET_A, XRAY).validate_final_answer(
+        HDR + " 单日 VaR 为 2.11%。"
+    )
+    invented = _ledger(tmp_path / "b", MARKET_A, XRAY).validate_final_answer(
+        HDR + " 单日 VaR 为 3.10%。"
+    )
+
+    assert _reasons(ambiguous) == ["tail_risk_needs_field_ref"]
+    assert _reasons(invented) == ["value_mismatch"]
+
+
+def test_a_non_tail_risk_figure_is_untouched_by_the_ref_rule(tmp_path: Path) -> None:
+    """A sharpe from another call still grounds off a call-scoped ref while the
+    session holds four tail-risk identities -- the rule keys on the value the
+    figure matches, not on the session having tail risk in it."""
+    result = _ledger(tmp_path, MARKET_A, XRAY, FACTOR_A).validate_final_answer(
+        HDR + " 夏普 0.888。" + _block(ROW, "0.888 | observed | sharpe | fa")
+    )
+
+    assert result.valid is True, result.issues
+
+
+@pytest.mark.parametrize(
+    ("claim", "ref"),
+    [
+        ("VaR 99%: 1.57%", "data.tail_risk.var_99"),
+        # A short ref used to name no field and fall through to the whole pool,
+        # where the 95% value answered a 99% claim (#1444 review, R18).
+        ("VaR 99%: 1.57%", "var_99"),
+        ("ES 95%: 1.57%", "expected_shortfall_95"),
+    ],
+)
+def test_a_field_ref_does_not_borrow_another_fields_value(tmp_path: Path, claim: str, ref: str) -> None:
+    confidence = "99% | count | confidence" if "99%" in claim else "95% | count | confidence"
+    result = _ledger(tmp_path, MARKET_A, XRAY).validate_final_answer(
+        HDR + f" {claim}。" + _block(ROW, confidence, f"1.57% | observed | {claim} | {ref}")
+    )
+    assert _reasons(result) == ["not_in_referenced_call"]
+
+
+def test_a_short_ref_names_whole_path_parts_only(tmp_path: Path) -> None:
+    """var_95 is the trailing part of data.risk.var_95, not of data.risk.cvar_95."""
+    risk = ("portfolio_risk_xray", {"symbols": [A]}, {"status": "ok", "data": {"risk": {"var_95": 0.0157, "cvar_95": 0.0211}}}, "x2")
+    result = _ledger(tmp_path, MARKET_A, risk).validate_final_answer(
+        HDR + " VaR 95%: 1.57%。" + _block(ROW, "95% | count | confidence", "1.57% | observed | VaR 95% | var_95")
+    )
+    assert result.valid is True, result.issues
+
+
+def test_a_field_two_calls_returned_differently_needs_its_call(tmp_path: Path) -> None:
+    """historical_var at 95% and at 99% is one field in two calls: the bare
+    field ref cannot say which it quotes, and the correction names both."""
+    q1, var_95 = _historical_var(0.95, "q1")
+    q2, var_99 = _historical_var(0.99, "q2")
+    assert var_95 != var_99
+    prose = HDR + f" VaR 95%: {_pct(var_95)}。"
+
+    def answer(ref: str):
+        return _ledger(tmp_path / ref.replace(":", "_"), MARKET_A, q1, q2).validate_final_answer(
+            prose + _block(ROW, "95% | count | confidence", f"{_pct(var_95)} | observed | VaR 95% | {ref}")
+        )
+
+    ambiguous = answer("historical_var")
+    assert _reasons(ambiguous) == ["ambiguous_field_ref"]
+    assert ambiguous.issues[0]["ambiguous_sources"] == ["q1::historical_var", "q2::historical_var"]
+    assert ambiguous.issues[0]["field_ref_candidates"] == [
+        "q1::historical_var",
+        "q2::historical_var",
+    ]
+    assert answer("q1::historical_var").valid is True
+    assert _reasons(answer("q2::historical_var")) == ["not_in_referenced_call"]
+
+
+def test_a_field_two_calls_returned_identically_is_not_ambiguous(tmp_path: Path) -> None:
+    q1, var_95 = _historical_var(0.95, "q1")
+    q2, same = _historical_var(0.95, "q2")
+    assert same == var_95
+    result = _ledger(tmp_path, MARKET_A, q1, q2).validate_final_answer(
+        HDR + f" VaR 95%: {_pct(var_95)}。"
+        + _block(ROW, "95% | count | confidence", f"{_pct(var_95)} | observed | VaR 95% | historical_var")
+    )
+    assert result.valid is True, result.issues
+
+
+def test_another_symbols_field_does_not_make_a_ref_ambiguous(tmp_path: Path) -> None:
+    """Two instruments' bars both carry ``close``; the figure's own symbol
+    decides before any count of calls (#1444 review, P9)."""
+    result = _ledger(tmp_path, MARKET_A, MARKET_B).validate_final_answer(
+        TWO + f"{A} 最新收盘 0.666 元。" + _block("0.666 | observed | close | close")
+    )
+    assert result.valid is True, result.issues
+
+
+def test_the_ambiguity_correction_names_the_refs_to_use() -> None:
+    from src.agent.grounding.release import _correction_line
+
+    line = _correction_line(
+        {
+            "value": "1.98%",
+            "role": "observed",
+            "reason": "ambiguous_field_ref",
+            "source_tool_call_ids": ["historical_var"],
+            "ambiguous_sources": ["q1::historical_var", "q2::historical_var"],
+        }
+    )
+    assert "historical_var names q1::historical_var, q2::historical_var" in line
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "CVaR 9.99%。",
+        "VaR 9.99%。",
+        "ES 9.99%。",
+        "VaR 37.2%: 1.57%。",
+        "VaR 12% higher than last month.",
+        "| Tail | VaR 9.99% |",
+        "VaR 95%: 1.57%, ES 9.99%。",
+        "VaR (99.9%) = 2.63%。",
+        "预期损失 2.3%。",
+    ],
+)
+def test_tail_risk_prose_does_not_skip_undeclared_numbers(
+    tmp_path: Path, claim: str
+) -> None:
+    result = _ledger(tmp_path, MARKET_A, XRAY).validate_final_answer(HDR + " " + claim)
+    assert result.valid is False
+
+
 # ---------------------------------------------------------------------------
 # B11 — what a rejected figure is pointed at
 # ---------------------------------------------------------------------------
@@ -638,7 +990,7 @@ def test_a_money_figure_is_derived_from_money(
     ],
 )
 def test_a_price_discount_and_a_drawdown_still_derive(tmp_path: Path, prose: str, row: str) -> None:
-    result = _ledger(tmp_path, MARKET_A).validate_final_answer(HDR + prose + _block(ROW, row))
+    result = _ledger(tmp_path, MARKET_A).validate_final_answer(HDR + declared_parameter("97%") + prose + _block(ROW, row))
 
     assert result.valid is True, result.issues
 

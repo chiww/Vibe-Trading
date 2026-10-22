@@ -52,6 +52,7 @@ READMES = (
     "README_ko.md",
     "README_ar.md",
     "README_es.md",
+    "README_id.md",
 )
 
 # Feature badges in the order they appear in every README. Each entry is the
@@ -71,7 +72,7 @@ BADGE_ORDER = ("skills", "brokers", "presets", "alphas", "engines", "quantlib")
 # each other, which they did while all five were uniformly wrong — eToro
 # shipped as the 13th connector and the pin stayed at 12. Same again for
 # KIS, Upbit, Toss and Scalable Capital, which landed together as 15-18.
-EXPECTED_BROKERS = 18
+EXPECTED_BROKERS = 19
 
 
 def _read(name: str) -> str:
@@ -290,7 +291,7 @@ def test_repo_tree_states_the_real_mcp_count(name: str) -> None:
 # Environment variables that make a credential-gated tool register. The
 # repository-tree line has always carried the keyless registry size (the count a
 # fresh install sees), so those gates are closed while measuring it.
-_CREDENTIAL_GATES = ("FRED_API_KEY", "VIBE_TRADING_IWENCAI_KEY", "QVERIS_API_KEY", "VIBE_TW_STOCK_DB")
+_CREDENTIAL_GATES = ("GILDATA_TOKEN", "FRED_API_KEY", "VIBE_TRADING_IWENCAI_KEY", "QVERIS_API_KEY", "VIBE_TW_STOCK_DB")
 
 
 @functools.lru_cache(maxsize=1)
@@ -697,3 +698,44 @@ def test_repo_tree_states_the_real_engine_count(readme: str) -> None:
         f"{readme}: engines tree line says {match.group('count')}, "
         f"the code ships {_engine_count() - 1} plus the composite engine"
     )
+
+
+# A fallback-chain bullet: "- **<label>** → `a` · `b` · …". The label is
+# translated, so the chains are matched as sequences, not by market name.
+_CHAIN_LINE_RE = re.compile(r"^- \*\*[^*\n]+\*\* → `")
+_CHAIN_RUN_RE = re.compile(r"→ ((?:`[a-z0-9_]+`(?: · )?)+)")
+
+
+def _readme_chains(name: str) -> set[tuple[str, ...]]:
+    """Return every fallback chain a README's bullet list writes out.
+
+    Args:
+        name: README file name relative to the repository root.
+
+    Returns:
+        Each chain as a tuple of source names, in the order written.
+    """
+    chains = set()
+    for line in _read(name).splitlines():
+        if _CHAIN_LINE_RE.match(line):
+            for run in _CHAIN_RUN_RE.findall(line):
+                chains.add(tuple(re.findall(r"`([a-z0-9_]+)`", run)))
+    return chains
+
+
+@pytest.mark.parametrize("readme", READMES)
+def test_fallback_chains_are_written_in_the_order_the_loader_walks(readme: str) -> None:
+    """The bullet list is the order ``source: "auto"`` tries sources in.
+
+    Crypto read okx · ccxt · binance and forex mt5 · yfinance · akshare for
+    months while the loader walked binance before ccxt and akshare before
+    yfinance. Checked both ways against the default chains: a written chain the
+    loader never walks is wrong, and a chain the loader walks that no bullet
+    shows is missing.
+    """
+    from backtest.loaders.registry import _DEFAULT_CHAINS
+
+    code = {tuple(chain) for chain in _DEFAULT_CHAINS.values()}
+    written = _readme_chains(readme)
+    assert not written - code, f"{readme}: chains the loader does not walk: {sorted(written - code)}"
+    assert not code - written, f"{readme}: chains the loader walks but the README omits: {sorted(code - written)}"

@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { createMemoryRouter, RouterProvider } from "react-router";
 import { RunDetail } from "../RunDetail";
 import type { RunData } from "@/lib/api";
@@ -252,6 +252,68 @@ describe("RunDetail page", () => {
     expect(screen.getByRole("columnheader", { name: "Time" })).toHaveClass("ps-4");
   });
 
+  it("lists every trade newest first and toggles the order from the time header", async () => {
+    const allTrades = Array.from({ length: 501 }, (_, i) => ({
+      timestamp: new Date(Date.UTC(2024, 0, 1 + i)).toISOString().slice(0, 10),
+      code: "3988.HK",
+    }));
+    // Out of order, and past the 500-row trade_log preview.
+    const shuffled = [...allTrades.slice(250), ...allTrades.slice(0, 250)];
+    apiMock.getRun.mockResolvedValue({
+      status: "success",
+      run_id: "long-run",
+      prompt: "Long run",
+      trade_log: shuffled.slice(0, 500),
+      artifacts_trades_csv: shuffled,
+    });
+    apiMock.getRunCode.mockResolvedValue({});
+
+    renderRunDetail("/runs/long-run");
+    await screen.findByText("Long run");
+    fireEvent.click(screen.getByRole("tab", { name: "Trades" }));
+
+    const firstRowTime = () => within(screen.getAllByRole("row")[1]).getAllByRole("cell")[0].textContent;
+    const timeHeader = screen.getByRole("columnheader", { name: "Time" });
+    expect(screen.getByText("501 trades")).toBeInTheDocument();
+    expect(timeHeader).toHaveAttribute("aria-sort", "descending");
+    expect(firstRowTime()).toBe(allTrades[500].timestamp);
+
+    fireEvent.click(within(timeHeader).getByRole("button"));
+
+    expect(timeHeader).toHaveAttribute("aria-sort", "ascending");
+    expect(firstRowTime()).toBe(allTrades[0].timestamp);
+  });
+
+  it("lists trade symbols in code order whichever way the trades are sorted", async () => {
+    apiMock.getRun.mockResolvedValue({
+      status: "success",
+      run_id: "multi",
+      prompt: "Multi symbol run",
+      artifacts_trades_csv: [
+        { timestamp: "2024-01-01", code: "00700.HK", side: "BUY" },
+        { timestamp: "2024-01-02", code: "02328.HK", side: "BUY" },
+        { timestamp: "2024-01-03", code: "00005.HK", side: "BUY" },
+        { timestamp: "2024-01-04", code: "00700.HK", side: "SELL" },
+      ],
+    });
+    apiMock.getRunCode.mockResolvedValue({});
+
+    renderRunDetail("/runs/multi");
+    await screen.findByText("Multi symbol run");
+    fireEvent.click(screen.getByRole("tab", { name: "Trades" }));
+
+    const symbolOptions = () => within(screen.getByRole("combobox", { name: "Symbol" }))
+      .getAllByRole("option")
+      .map((option) => option.textContent);
+    const expected = ["All symbols", "00005.HK", "00700.HK", "02328.HK"];
+    expect(symbolOptions()).toEqual(expected);
+
+    const timeHeader = screen.getByRole("columnheader", { name: "Time" });
+    fireEvent.click(within(timeHeader).getByRole("button"));
+
+    expect(symbolOptions()).toEqual(expected);
+  });
+
   it("pads and scroll-wraps run-card key/value and artifact tables", async () => {
     apiMock.getRun.mockResolvedValue({
       status: "success",
@@ -325,6 +387,73 @@ describe("RunDetail page", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Run Card" }));
 
     expect(await screen.findByText("No structured metrics recorded.")).toBeInTheDocument();
+  });
+
+  it("renders execution status, UTC times and complete metric evidence hashes", async () => {
+    const argsHash = "a".repeat(64);
+    const resultHash = "b".repeat(64);
+    const artifactHash = "c".repeat(64);
+    const runCard: NonNullable<RunData["run_card"]> = {
+      schema_version: "v1",
+      tool_traces: [
+        { tool: "load_data", started_at: "2026-09-27T01:00:00Z", ended_at: "2026-09-27T01:00:01Z", status: "ok", args_hash: argsHash, result_hash: resultHash },
+        { tool: "generate_signals", started_at: "2026-09-27T01:00:02Z", ended_at: "2026-09-27T01:00:03Z", status: "error", args_hash: "d".repeat(64), result_hash: "e".repeat(64) },
+        { tool: "backtest", started_at: "2026-09-27T01:00:04Z", ended_at: "2026-09-27T01:00:05Z", status: "cancelled", args_hash: "f".repeat(64), result_hash: "0".repeat(64) },
+      ],
+      citations: [{ metric: "sharpe", artifact_id: "artifacts/metrics.csv", column: "sharpe", row: 1, sha256: artifactHash }],
+    };
+    apiMock.getRun.mockResolvedValue({ status: "success", run_id: "trust", prompt: "Evidence run", run_card: runCard });
+    apiMock.getRunCode.mockResolvedValue({});
+    renderRunDetail("/runs/trust");
+    fireEvent.click(await screen.findByRole("tab", { name: "Run Card" }));
+
+    const executions = screen.getByText("Execution records").closest("section")!;
+    expect(within(executions).getByText("Load data")).toBeInTheDocument();
+    expect(within(executions).getByText("Generate signals")).toBeInTheDocument();
+    expect(within(executions).getByText("Backtest")).toBeInTheDocument();
+    for (const status of ["Completed", "Failed", "Cancelled"]) {
+      expect(within(executions).getByText(status)).toBeInTheDocument();
+    }
+    expect(within(executions).getByText("2026-09-27T01:00:00Z")).toHaveAttribute("dateTime", "2026-09-27T01:00:00Z");
+    expect(within(executions).getByText("2026-09-27T01:00:01Z")).toBeInTheDocument();
+    expect(within(executions).getByText(argsHash)).toHaveClass("break-all");
+    expect(within(executions).getByText(resultHash)).toBeInTheDocument();
+
+    const evidence = screen.getByText("Metric evidence").closest("section")!;
+    expect(within(evidence).getAllByText("sharpe")).toHaveLength(2);
+    expect(within(evidence).getByText("artifacts/metrics.csv")).toBeInTheDocument();
+    expect(within(evidence).getByText("Data row (1-based, excluding header)")).toBeInTheDocument();
+    expect(within(evidence).getByText("1")).toBeInTheDocument();
+    expect(within(evidence).getByText(artifactHash)).toHaveClass("break-all");
+    expect(within(evidence).getByText(/does not independently verify/)).toBeInTheDocument();
+    expect(within(evidence).queryByRole("link")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    { schema_version: "v0", metrics: { sharpe: 1.42 } },
+    { schema_version: "v1", tool_traces: [], citations: [] },
+  ])("explicitly reports absent evidence for $schema_version cards", async (runCard) => {
+    apiMock.getRun.mockResolvedValue({ status: "success", run_id: "no-evidence", prompt: "No evidence", run_card: runCard });
+    apiMock.getRunCode.mockResolvedValue({});
+    renderRunDetail("/runs/no-evidence");
+    fireEvent.click(await screen.findByRole("tab", { name: "Run Card" }));
+    expect(screen.getByText("Execution records were not recorded for this run.")).toBeInTheDocument();
+    expect(screen.getByText("Metric evidence was not recorded for this run.")).toBeInTheDocument();
+    if (runCard.schema_version === "v0") expect(screen.getByText("1.4200")).toBeInTheDocument();
+  });
+
+  it("renders artifact references as inert text", async () => {
+    const unsafeReference = "javascript:alert('<img src=x onerror=alert(1)>')";
+    apiMock.getRun.mockResolvedValue({
+      status: "success", run_id: "inert", prompt: "Inert references",
+      run_card: { citations: [{ metric: "return", artifact_id: unsafeReference, column: "return", row: 1, sha256: "a".repeat(64) }] },
+    });
+    apiMock.getRunCode.mockResolvedValue({});
+    renderRunDetail("/runs/inert");
+    fireEvent.click(await screen.findByRole("tab", { name: "Run Card" }));
+    const evidence = screen.getByText("Metric evidence").closest("section")!;
+    expect(within(evidence).getByText(unsafeReference)).toBeInTheDocument();
+    expect(evidence.querySelector("a, img")).toBeNull();
   });
 
   it("renders the Factor Research tab from has_factor_artifacts and lazy-loads the report", async () => {

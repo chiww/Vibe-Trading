@@ -7,6 +7,7 @@ same research workflow through a separate provider with a compatible envelope.
 
 from __future__ import annotations
 
+import math
 from datetime import date, timedelta
 from typing import Any
 
@@ -79,11 +80,12 @@ def _to_float(value: Any) -> float | None:
 def _net_amount(row: dict[str, Any], buy_key: str, sell_key: str) -> float | None:
     buy = _to_float(row.get(buy_key))
     sell = _to_float(row.get(sell_key))
-    if buy is None and sell is None:
+    if buy is None or sell is None or not math.isfinite(buy) or not math.isfinite(sell):
         return None
     # Tushare moneyflow amount fields are in 10k CNY; the Eastmoney tool emits
     # CNY, so convert to keep the existing bucket units.
-    return ((buy or 0.0) - (sell or 0.0)) * 10_000
+    value = (buy - sell) * 10_000
+    return value if math.isfinite(value) else None
 
 
 def _ts_code(code: str) -> str:
@@ -99,18 +101,30 @@ def _ts_code(code: str) -> str:
             break
     if len(token) != 6 or not token.isdigit():
         raise TushareFallbackUnavailable(f"unsupported Tushare symbol: {code}")
-    if token.startswith(("5", "6", "9")):
+    if token.startswith(("4", "8", "920")):
+        suffix = "BJ"
+    elif token.startswith(("5", "6", "9")):
         suffix = "SH"
     elif token.startswith(("0", "2", "3")):
         suffix = "SZ"
-    elif token.startswith(("4", "8")):
-        suffix = "BJ"
     else:
         raise TushareFallbackUnavailable(f"unsupported Tushare symbol: {code}")
     return f"{token}.{suffix}"
 
 
 def fetch_fund_flow(symbol: str, *, days: int) -> dict[str, Any]:
+    """Read daily Tushare buckets with explicit units and missing observations.
+
+    Args:
+        symbol: A-share instrument accepted by the Tushare adapter.
+        days: Maximum number of recent trading days to return.
+
+    Returns:
+        Source-labelled rows in CNY, with total flow separate from main orders.
+
+    Raises:
+        TushareFallbackUnavailable: Symbol, credentials or data are unavailable.
+    """
     ts_code = _ts_code(symbol)
     start_date, end_date = _date_window(days)
     rows = _records(
@@ -118,19 +132,43 @@ def fetch_fund_flow(symbol: str, *, days: int) -> dict[str, Any]:
     )
     parsed: list[dict[str, Any]] = []
     for row in rows:
+        large = _net_amount(row, "buy_lg_amount", "sell_lg_amount")
+        super_large = _net_amount(row, "buy_elg_amount", "sell_elg_amount")
+        net_total = _to_float(row.get("net_mf_amount"))
+        net_total = net_total * 10_000 if net_total is not None else None
+        if net_total is not None and not math.isfinite(net_total):
+            net_total = None
+        # moneyflow.net_mf_amount is total net flow, not the main-order bucket.
+        # https://tushare.pro/document/2?doc_id=170
+        main = large + super_large if large is not None and super_large is not None else None
+        if main is not None and not math.isfinite(main):
+            main = None
         parsed.append(
             {
                 "timestamp": _dashed_date(row.get("trade_date")),
-                "main": (_to_float(row.get("net_mf_amount")) or 0.0) * 10_000,
+                "main": main,
+                "net_total": net_total,
                 "small": _net_amount(row, "buy_sm_amount", "sell_sm_amount"),
                 "medium": _net_amount(row, "buy_md_amount", "sell_md_amount"),
-                "large": _net_amount(row, "buy_lg_amount", "sell_lg_amount"),
-                "super_large": _net_amount(row, "buy_elg_amount", "sell_elg_amount"),
+                "large": large,
+                "super_large": super_large,
             }
         )
+    if not parsed:
+        raise TushareFallbackUnavailable("tushare returned no fund-flow rows")
     parsed.sort(key=lambda item: item.get("timestamp") or "")
     parsed = parsed[-days:]
-    return {"symbol": symbol, "ts_code": ts_code, "source": "tushare", "rows": parsed}
+    return {
+        "symbol": symbol,
+        "ts_code": ts_code,
+        "source": "tushare",
+        "rows": parsed,
+        "methodology": (
+            "Tushare moneyflow active buy/sell buckets in CNY; main = large + "
+            "super_large; net_total is the provider's total net flow. "
+            "Provider classifications may differ from Eastmoney."
+        ),
+    }
 
 
 def fetch_dragon_tiger(trade_date: str, code: str | None) -> dict[str, Any]:
@@ -178,32 +216,81 @@ def fetch_dragon_tiger(trade_date: str, code: str | None) -> dict[str, Any]:
     return data
 
 
+#: Tushare's northbound fields changed to turnover at the 2024-08-19
+#: disclosure cutover (issue #1481). Keep the boundary explicit so a
+#: post-cutover turnover value cannot be returned under a net-flow key.
+_NORTHBOUND_SEMANTICS_BOUNDARY = "2024-08-19"
+
+_NORTHBOUND_NOTE = (
+    "HKEX stopped publishing northbound daily net buy on "
+    f"{_NORTHBOUND_SEMANTICS_BOUNDARY}. From that date onward tushare's "
+    "hgt/sgt/north_money carry northbound TURNOVER (verified equal to the "
+    "HKEX official Stock Connect Daily Statistics Total Turnover to the "
+    "cent); rows before the boundary are NET BUY. Post-cutover rows are "
+    "returned under turnover_* fields and their net-flow fields are null. "
+    "Both eras are in million CNY."
+)
+
+
 def fetch_northbound_flow(*, lookback_days: int) -> dict[str, Any]:
+    """Fetch northbound Stock-Connect flow via tushare ``moneyflow_hsgt``.
+
+    Values are passed through in tushare's native unit (million CNY). The
+    legacy ×100 rescale to 10k CNY assumed every row was a net buy in
+    million CNY, but the field semantics changed at the 2024-08-19 HKEX
+    disclosure reform: post-boundary rows are turnover (cross-verified
+    against HKEX official daily statistics, see issue #1481), so a single
+    constant factor cannot serve both eras. The envelope therefore keeps
+    the raw values and documents the boundary in ``note`` instead.
+    """
     start_date, end_date = _date_window(lookback_days)
     rows = _records(_pro_api().moneyflow_hsgt(start_date=start_date, end_date=end_date))
     history: list[dict[str, Any]] = []
     for row in rows:
+        trade_date = _dashed_date(row.get("trade_date"))
+        if trade_date is None:
+            continue
         shanghai = _to_float(row.get("hgt"))
         shenzhen = _to_float(row.get("sgt"))
         total = _to_float(row.get("north_money"))
-        history.append(
-            {
-                "trade_date": _dashed_date(row.get("trade_date")),
-                "shanghai_connect": shanghai * 100 if shanghai is not None else None,
-                "shenzhen_connect": shenzhen * 100 if shenzhen is not None else None,
-                "total": total * 100 if total is not None else None,
-            }
-        )
+        if trade_date >= _NORTHBOUND_SEMANTICS_BOUNDARY:
+            history.append(
+                {
+                    "trade_date": trade_date,
+                    "shanghai_connect": None,
+                    "shenzhen_connect": None,
+                    "total": None,
+                    "turnover_shanghai": shanghai,
+                    "turnover_shenzhen": shenzhen,
+                    "turnover_total": total,
+                }
+            )
+        else:
+            history.append(
+                {
+                    "trade_date": trade_date,
+                    "shanghai_connect": shanghai,
+                    "shenzhen_connect": shenzhen,
+                    "total": total,
+                    "turnover_shanghai": None,
+                    "turnover_shenzhen": None,
+                    "turnover_total": None,
+                }
+            )
     history.sort(key=lambda item: item.get("trade_date") or "")
     history = history[-lookback_days:]
     latest = history[-1] if history else {}
     return {
-        "unit": "10k CNY",
+        "unit": "CNY million",
         "lookback_days": lookback_days,
+        "note": _NORTHBOUND_NOTE,
         "realtime": {
             "shanghai_connect": latest.get("shanghai_connect"),
             "shenzhen_connect": latest.get("shenzhen_connect"),
             "total": latest.get("total"),
+            "turnover_shanghai": latest.get("turnover_shanghai"),
+            "turnover_shenzhen": latest.get("turnover_shenzhen"),
+            "turnover_total": latest.get("turnover_total"),
         },
         "history": history,
     }

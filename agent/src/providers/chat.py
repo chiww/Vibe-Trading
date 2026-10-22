@@ -128,6 +128,9 @@ class LLMResponse:
         response_model: Model identifier reported by the provider response,
             when available. This is authoritative runtime metadata and must
             not be inferred from the model's natural-language self-report.
+        provider_items: Opaque output items the provider needs back verbatim
+            on the next request of the same turn chain (the Codex backend's
+            encrypted reasoning items). Never shown, never summarised.
     """
 
     content: Optional[str] = None
@@ -137,6 +140,7 @@ class LLMResponse:
     usage_metadata: Optional[Dict[str, int]] = None
     content_filter_triggered: bool = False
     response_model: Optional[str] = None
+    provider_items: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
     def has_tool_calls(self) -> bool:
@@ -163,13 +167,14 @@ def _extract_retry_after_s(original: Exception) -> Optional[float]:
 class ProviderStreamError(RuntimeError):
     """Raised when provider streaming fails before a complete response."""
 
-    def __init__(self, *, provider: str, model: str, original: Exception) -> None:
+    def __init__(self, *, provider: str, model: str, original: Exception, usage_metadata: dict | None = None) -> None:
         """Initialize a provider-contextual stream error.
 
         Args:
             provider: Effective provider name.
             model: Effective model name.
             original: Original exception from the stream path.
+            usage_metadata: Usage already reported before stream failure.
 
         Attributes:
             retry_after_s: Provider-suggested Retry-After delay in seconds,
@@ -179,6 +184,7 @@ class ProviderStreamError(RuntimeError):
         self.provider = provider
         self.model = model
         self.original = original
+        self.usage_metadata = usage_metadata
         self.status_code: Optional[int] = getattr(original, "status_code", None)
         self.retry_after_s: Optional[float] = _extract_retry_after_s(original)
         safe_message = _redact_provider_error(str(original))
@@ -477,6 +483,7 @@ class ChatLLM:
         timeout: Optional[int] = None,
         idle_timeout_s: Optional[float] = None,
         should_cancel: Optional[Callable[[], bool]] = None,
+        on_waiting_chunk: Optional[Callable[[], None]] = None,
     ) -> LLMResponse:
         """Stream the LLM and optionally forward text deltas (e.g. thinking).
 
@@ -493,6 +500,8 @@ class ChatLLM:
             idle_timeout_s: Optional per-chunk idle timeout; when no stream
                 delta arrives for this long the call fails as a retryable
                 timeout instead of hanging the loop silently.
+            on_waiting_chunk: Provider-confirmed waiting activity, carrying no text.
+                Plain empty chunks and transport keepalives do not invoke it.
             should_cancel: Optional predicate polled per chunk; when it returns
                 True the stream stops early and the partial response is returned.
                 Lets a caller abort a live stream promptly (cooperative cancel).
@@ -500,6 +509,7 @@ class ChatLLM:
         Returns:
             Parsed ``LLMResponse``.
         """
+        accumulated = None
         try:
             llm = self._llm.bind_tools(tools) if tools else self._llm
             config = {"timeout": timeout} if timeout else {}
@@ -508,6 +518,7 @@ class ChatLLM:
             pending_text = ""
             possible_dsml_text = True
             cancelled = False
+            cancelled_usage = None
             last_chunk_ts = _time.monotonic()
             for chunk in llm.stream(messages, config=config, **call_kwargs):
                 now = _time.monotonic()
@@ -521,7 +532,14 @@ class ChatLLM:
                 last_chunk_ts = now
                 if should_cancel and should_cancel():
                     cancelled = True
+                    # This chunk already arrived. Preserve any reported usage
+                    # while still dropping its text and tool-call deltas.
+                    if getattr(chunk, "usage_metadata", None):
+                        usage_chunk = chunk if accumulated is None else accumulated + chunk
+                        cancelled_usage = usage_chunk.usage_metadata
                     break
+                if getattr(chunk, "additional_kwargs", {}).get("provider_waiting") is True and on_waiting_chunk:
+                    on_waiting_chunk()
                 chunk_text = _text_content(chunk.content)
                 if chunk_text and on_text_chunk:
                     if possible_dsml_text:
@@ -540,7 +558,10 @@ class ChatLLM:
                 accumulated = chunk if accumulated is None else accumulated + chunk
             if accumulated is None:
                 if cancelled:
-                    return LLMResponse(content="", tool_calls=[], finish_reason="stop")
+                    return LLMResponse(
+                        content="", tool_calls=[], finish_reason="stop",
+                        usage_metadata=cancelled_usage,
+                    )
                 # Endpoint streamed nothing (no SSE support); a non-streaming
                 # invoke still works — fall back rather than return empty.
                 logger.warning(
@@ -548,7 +569,17 @@ class ChatLLM:
                     "non-streaming invoke."
                 )
                 return self._parse_response(llm.invoke(messages, config=config, **call_kwargs))
+            # Chat Completions must explicitly finish a choice; a clean socket
+            # EOF is not a final answer. LangChain otherwise defaults missing
+            # metadata to "stop" and releases a truncated report/tool call.
+            metadata = getattr(accumulated, "response_metadata", {}) or {}
+            if (not cancelled and getattr(self._llm, "_llm_type", None) == "openai-chat"
+                    and not (metadata.get("finish_reason") or metadata.get("stop_reason")
+                             or metadata.get("status") in {"completed", "incomplete", "failed"})):
+                raise ConnectionError("Provider stream ended without a terminal finish reason")
             response = self._parse_response(accumulated)
+            if cancelled_usage is not None:
+                response.usage_metadata = cancelled_usage
             if pending_text and not (response.has_tool_calls and response.content == ""):
                 on_text_chunk(pending_text)
             return response
@@ -565,7 +596,10 @@ class ChatLLM:
             _cfg = get_env_config()
             provider = _cfg.llm.langchain_provider.strip().lower() or "openai"
             model = self.model_name or _cfg.llm.langchain_model_name.strip() or "(unset)"
-            raise ProviderStreamError(provider=provider, model=model, original=exc) from exc
+            raise ProviderStreamError(
+                provider=provider, model=model, original=exc,
+                usage_metadata=getattr(accumulated, "usage_metadata", None),
+            ) from exc
 
     @staticmethod
     def _tool_call_thought_signature_maps(ai_message: Any) -> tuple[dict[str, str], dict[int, str]]:
@@ -682,6 +716,7 @@ class ChatLLM:
             usage_metadata=usage,
             content_filter_triggered=content_filter_triggered,
             response_model=response_model,
+            provider_items=list(additional_kwargs.get("provider_items") or []),
         )
 
 

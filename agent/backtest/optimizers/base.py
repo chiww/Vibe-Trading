@@ -58,7 +58,10 @@ class BaseOptimizer(ABC):
         result = pos.copy()
         for i, dt in enumerate(dates):
             active = [c for c in codes if abs(pos.at[dt, c]) > 1e-9]
-            if not active or i < self.lookback:
+            if i < self.lookback:
+                continue
+            if not active:
+                self._on_passthrough_allocation(result.loc[dt])
                 continue
 
             # Signals are executed at the decision bar's open.  ``ret[dt]``
@@ -68,25 +71,48 @@ class BaseOptimizer(ABC):
             history = ret.loc[ret.index < dt, active]
             window = history.tail(self.lookback)
             if len(window) < max(self.lookback // 2, 5):
+                self._on_passthrough_allocation(result.loc[dt])
                 continue
 
-            ctx = self._build_context(window, active)
+            signs = np.array([np.sign(pos.at[dt, c]) for c in active])
+            # Hand subclasses the window in POSITION space: a short's column is
+            # negated, so every context built from it describes what is actually
+            # being sized. ``mu`` becomes the position's expected return (a
+            # short earns the negative of its asset's drift) and ``cov`` becomes
+            # D Sigma D, whose cross terms flip sign for a long/short pair --
+            # signing only ``mu`` would score the numerator in position space
+            # and the variance in asset space, so a hedged pair would still
+            # read as correlated. Volatility-only contexts are unaffected
+            # (std(-r) == std(r)).
+            signed = window.mul(pd.Series(signs, index=window.columns), axis=1)
+            ctx = self._build_context(signed, active)
             if ctx is None:
+                self._on_passthrough_allocation(result.loc[dt])
                 continue
 
+            # Stateful optimizers need the direction as well as the signed
+            # return window to measure changes between actual allocations.
+            ctx["position_signs"] = signs
             weights = self._calc_weights(ctx)
             if weights is None or len(weights) != len(active):
+                self._on_passthrough_allocation(result.loc[dt])
                 continue
 
             for j, c in enumerate(active):
-                sign = np.sign(pos.at[dt, c])
-                result.at[dt, c] = sign * weights[j]
+                result.at[dt, c] = signs[j] * weights[j]
 
         return result
 
     # ------------------------------------------------------------------
     # Hooks
     # ------------------------------------------------------------------
+
+    def _on_passthrough_allocation(self, allocation: pd.Series) -> None:
+        """Observe a post-warmup allocation retained without optimization.
+
+        Args:
+            allocation: Signed output allocation for the current decision date.
+        """
 
     def _build_context(
         self, window: pd.DataFrame, active: List[str]
@@ -97,7 +123,10 @@ class BaseOptimizer(ABC):
         Return None to skip the date.
 
         Args:
-            window: Return window for active assets.
+            window: Return window for active assets, in POSITION space -- a
+                short's column is already negated by ``optimize``, so a mean
+                taken here is the position's expected return and a covariance
+                is the position covariance.
             active: Active asset codes.
 
         Returns:

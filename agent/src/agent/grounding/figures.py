@@ -17,11 +17,22 @@ import html
 import re
 import string
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 from typing import Iterable, Sequence
 
 from src.agent.grounding.identity import _CANONICAL_SYMBOL_RE
+
+#: Maximum relative rounding gap; written precision can only narrow this.
+#: Coarse rounding such as 0.82467 -> 0.82 exceeds the existing 0.5% policy;
+#: the answer must retain more digits instead of widening its evidence band.
+ROUNDED_BAND = 0.005
+
+#: A declared value written as a fraction of two integers ("1/3").
+_FRACTION_RE = re.compile(r"([1-9]\d{0,2})\s*/\s*([1-9]\d{0,2})")
+
+#: Marks of a multiple a declared value may carry ("5.5x", "3 倍").
+_MULTIPLE_MARKS = frozenset({"x", "X", "×", "倍"})
 
 #: The five roles a declaration may carry (spec §2).
 ROLES = ("observed", "derived", "proposed", "cited", "count")
@@ -74,6 +85,7 @@ _CURRENCY_CODES = frozenset(
     {
         "USD", "CNY", "CNH", "RMB", "HKD", "JPY", "EUR", "GBP", "KRW", "INR",
         "CAD", "AUD", "SGD", "TWD", "THB", "IRR", "IRT", "USDT", "USDC",
+        "CHF", "NZD", "BRL", "ARS", "VND",
     }
 )
 
@@ -135,25 +147,44 @@ class FiguresBlock:
     malformed: tuple[tuple[int, str], ...]
     spans: tuple[tuple[int, int], ...] = ()
 
-    def match(self, value: float, percent: bool) -> Declaration | None:
+    def match(
+        self, value: float, percent: bool, digits: str | None = None
+    ) -> Declaration | None:
         """Return the declaration covering ``value``, or None.
 
-        Matching is numeric (tolerance 1e-9) and percent-ness must agree:
-        ``37%`` and ``0.37`` are different assertions.
+        Matching is numeric and percent-ness must agree: ``37%`` and ``0.37`` are
+        different assertions. An exact value (tolerance 1e-9) always wins. Failing
+        that, a figure written with decimals ("38,68") covers a declaration holding
+        the precise observation ("38.68005857871268") when it is that value correctly
+        rounded to the digits written: within half a unit of its last decimal, and
+        never further than :data:`ROUNDED_BAND` of the declared value. A figure written
+        without decimals is only ever an exact match, so a coarse "39" cannot borrow
+        38.68's declaration.
 
         Args:
             value: The prose figure's numeric value.
             percent: Whether the prose figure carries a percent sign.
+            digits: The prose figure's normalized digits ("38.68"), or None to
+                require an exact match.
 
         Returns:
-            The first matching declaration, or None.
+            The matching declaration (the nearest one when several round to the
+            same figure), or None.
         """
-        for declaration in self.declarations:
-            if declaration.percent != percent:
-                continue
+        candidates = [item for item in self.declarations if item.percent == percent]
+        for declaration in candidates:
             if abs(declaration.value - value) <= max(abs(value) * 1e-9, 1e-9):
                 return declaration
-        return None
+        if not digits or "." not in digits:
+            return None
+        half_unit = 0.5 * 10.0 ** -len(digits.split(".", 1)[1])
+        rounded = [
+            (abs(item.value - value), item)
+            for item in candidates
+            if abs(item.value - value) <= half_unit * (1 + 1e-9)
+            and abs(item.value - value) <= abs(item.value) * ROUNDED_BAND
+        ]
+        return min(rounded, key=lambda pair: pair[0])[1] if rounded else None
 
 
 @dataclass(frozen=True)
@@ -179,6 +210,8 @@ class Figure:
     scale: float = 1.0
     # A currency mark or ISO code touches the digits ("$2050", "0.95 元").
     currency: bool = False
+    # Unambiguous ISO currency identity; None for ambiguous or absent markers.
+    currency_code: str | None = None
     digits: str = ""
     sign: str = ""
     # The span a redaction replaces: the figure plus its glued currency and
@@ -221,12 +254,15 @@ class _Normalized:
 
 @dataclass(frozen=True)
 class _Token:
-    """One number in normalized text: its span, sign and digits as written."""
+    """One number in normalized text: its span, sign and normalized digits."""
 
     start: int
     end: int
     sign: str
     digits: str
+    # A visible thousands separator made this an explicitly formatted numeric
+    # figure even though its normalized digits are an integer.
+    grouped: bool = False
 
 
 # Header spellings binding a table column to an OHLC field: the table's own
@@ -355,21 +391,72 @@ def _digit_run(text: str, index: int) -> str:
     return text[index:end]
 
 
-def _numbers(text: str) -> list[_Token]:
+# A dotted-thousands number with a decimal comma ("1.234,56", "1.234.567,89"): a number has
+# one decimal separator, so the dots group and the comma is the decimal. The lead group is
+# non-zero ("0.500,0" is a decimal followed by a list) and a fraction running into another
+# dotted number ("1.234,5.6") is a list, not a decimal.
+_DOTTED_DECIMAL_RE = re.compile(
+    r"(?<![\d.,])[+-]?[1-9]\d{0,2}(?:\.\d{3})+,\d+(?!\d|\.\d)"
+)
+
+# A dot-only grouped integer ("5.165", "502.408", "1.234.567") is ambiguous on its
+# own because the same spelling can be a decimal. It is grouping only after the
+# surrounding document has independently established decimal-comma notation.
+_DOTTED_GROUPING_RE = re.compile(
+    r"(?<![\d.,])[+-]?[1-9]\d{0,2}(?:\.\d{3})+(?![\d.,])"
+)
+
+
+def _numbers(text: str, *, decimal_commas: bool | None = None) -> list[_Token]:
     """Every number in normalized text, with a decimal comma read as one (#1418).
 
     A comma is a decimal point when the integer part is exactly "0" ("0,666"),
     or when a one- or two-digit fraction carries a percent, pp/bp or currency
-    mark ("12,5 %", "3,95 EUR", "€3,95"). A document that writes an unambiguous
-    decimal comma anywhere and no unambiguous grouping ("1,234,567",
+    mark ("12,5 %", "3,95 EUR", "€3,95"). Document-level notation needs
+    stronger evidence than a bare one-digit "0,1" pair; see
+    :func:`_writes_decimal_commas`. A document with that evidence and no grouping ("1,234,567",
     "1,234.56") reads every single-comma number as a decimal, so "2,237" and
     "−5,132%" beside "1,57%" are 2.237 and −5.132%, not 2237 and −5132%.
+
+    Dotted thousands followed by a decimal comma ("1.234,56") are unambiguous.
+    Once the document independently establishes decimal-comma notation, dot-only
+    grouped integers ("5.165", "502.408", "1.234.567") are read as thousands too;
+    without that document evidence they keep their decimal reading. Long comma
+    fractions are only decimal when the number itself carries a local marker (for
+    example "17,9318145214327%"); an unmarked "1400,1777" remains two numbers rather
+    than being guessed as 1400.1777. ``decimal_commas`` lets a caller that parses
+    a fragment of a larger document (a declaration cell) pass the reading of the
+    whole document instead of re-deriving it from the fragment.
     """
-    comma_decimals = _writes_decimal_commas(text)
+    comma_decimals = (
+        _writes_decimal_commas(text) if decimal_commas is None else decimal_commas
+    )
+    dotted = [
+        _Token(
+            match.start(),
+            match.end(),
+            match.group(0)[0] if match.group(0)[0] in "+-" else "",
+            match.group(0).lstrip("+-").replace(".", "").replace(",", "."),
+        )
+        for match in _DOTTED_DECIMAL_RE.finditer(text)
+    ]
+    dotted_grouped = [
+        _Token(
+            match.start(),
+            match.end(),
+            match.group(0)[0] if match.group(0)[0] in "+-" else "",
+            match.group(0).lstrip("+-").replace(".", ""),
+            True,
+        )
+        for match in _DOTTED_GROUPING_RE.finditer(text)
+    ] if comma_decimals else []
+    protected = dotted + dotted_grouped
     tokens: list[_Token] = []
     cursor = 0
     for match in _NUMBER_RE.finditer(text):
         if match.start() < cursor:
+            continue
+        if any(token.start <= match.start() < token.end for token in protected):
             continue
         raw = match.group(0)
         sign = raw[0] if raw[0] in "+-" else ""
@@ -382,44 +469,86 @@ def _numbers(text: str) -> list[_Token]:
             if fraction and (
                 body == "0"
                 or comma_decimals
+                or _percent_mark(text, stop)[0] > 0
                 or (
                     len(fraction) <= 2
                     and (
                         _currency_before(text, match.start())
                         or _currency_after(text, stop)
-                        or _percent_mark(text, stop)[0] > 0
                     )
                 )
             ):
                 body, end = f"{body}.{fraction}", stop
         tokens.append(_Token(match.start(), end, sign, body.replace(",", "")))
         cursor = end
-    return tokens
+    signed = [
+        replace(token, sign=text[lead]) if not token.sign and lead is not None else token
+        for token in tokens + protected
+        for lead in (_sign_before_currency(text, token.start),)
+    ]
+    return sorted(signed, key=lambda token: token.start)
+
+
+# What may stand before a sign written outside a currency mark ("PnL: -$3.20",
+# "(−$5.00)"): a hyphen after anything else joins two figures ("$10-$20"), and
+# one followed by a space ("$10 - $20") is a range, as "10 - 20" already is.
+_SIGN_BOUNDARY = frozenset("([:=,;|（［：＝，；｜")
+
+
+def _sign_before_currency(text: str, start: int) -> int | None:
+    """Where a sign glued to the left of a number's currency mark stands ("−$1,847.78").
+
+    The minus is normalized to "-" before this is read.
+
+    Args:
+        text: Normalized text.
+        start: Where the number's digits begin.
+
+    Returns:
+        The sign's index, or None when the mark carries no sign or the sign
+        does not stand at a boundary.
+    """
+    mark = _currency_prefix_start(text, start)
+    if mark == start or mark == 0 or text[mark - 1] not in "+-":
+        return None
+    before = text[mark - 2] if mark >= 2 else ""
+    if before and not before.isspace() and before not in _SIGN_BOUNDARY:
+        return None
+    return mark - 1
 
 
 def _writes_decimal_commas(text: str) -> bool:
     """Whether a document writes decimal commas and never a thousands grouping.
 
-    Evidence for a decimal comma is unambiguous on its own: a "0," integer part,
-    or a one- or two-digit fraction carrying a percent, pp/bp or currency mark
-    ("1,57%", "3,95 EUR"). An unmarked "1,50" could be a list and proves nothing.
-    Evidence for grouping is two or more comma groups or a grouped number with a
-    dot fraction.
+    Evidence for a decimal comma is a zero integer part with at least two
+    fractional digits (a bare "0,1" could be a list and changes no other number),
+    dotted thousands with a decimal comma ("1.234,56"), a fraction of any length
+    carrying a percent/pp/bp mark ("17,9318145214327%"), or a one- or two-digit
+    fraction carrying a currency mark ("3,95 EUR"). An unmarked "1,50" or a lone
+    table cell such as "| 5,20 |" proves nothing and cannot switch the rest of the
+    document into decimal-comma mode. Evidence for grouping is two or more comma
+    groups or a grouped number with a dot fraction.
     """
-    decimal, grouped = False, False
+    decimal, grouped = bool(_DOTTED_DECIMAL_RE.search(text)), False
     for match in _NUMBER_RE.finditer(text):
         body = match.group(0).lstrip("+-")
         if body.count(",") >= 2 or ("," in body and "." in body):
             grouped = True
         elif body.startswith("0,"):
-            decimal = True
+            decimal = len(body.split(",", 1)[1]) >= 2 or decimal
         elif body.isdigit() and text[match.end() : match.end() + 1] == ",":
             fraction = _digit_run(text, match.end() + 1)
             stop = match.end() + 1 + len(fraction)
-            if 1 <= len(fraction) <= 2 and (
-                _currency_before(text, match.start())
-                or _currency_after(text, stop)
-                or _percent_mark(text, stop)[0] > 0
+            if (
+                (body == "0" and len(fraction) >= 2)
+                or (bool(fraction) and _percent_mark(text, stop)[0] > 0)
+                or (
+                    1 <= len(fraction) <= 2
+                    and (
+                        _currency_before(text, match.start())
+                        or _currency_after(text, stop)
+                    )
+                )
             ):
                 decimal = True
     return decimal and not grouped
@@ -521,7 +650,9 @@ def _is_currency_mark(word: str) -> bool:
     )
 
 
-def _parse_value(text: str) -> tuple[float, bool, str] | None:
+def _parse_value(
+    text: str, decimal_commas: bool | None = None
+) -> tuple[float, bool, str] | None:
     """Read a declared value: one number with its currency, magnitude and percent marks.
 
     Returns:
@@ -529,7 +660,11 @@ def _parse_value(text: str) -> tuple[float, bool, str] | None:
         exactly one number and its marks.
     """
     field = _normalize(text).text.strip()
-    tokens = _numbers(field)
+    fraction = _FRACTION_RE.fullmatch(field)
+    if fraction is not None:
+        # "1/3" for an equal weight: a value, not two numbers.
+        return int(fraction.group(1)) / int(fraction.group(2)), False, field.replace(" ", "")
+    tokens = _numbers(field, decimal_commas=decimal_commas)
     if len(tokens) != 1:
         return None
     token = tokens[0]
@@ -537,10 +672,16 @@ def _parse_value(text: str) -> tuple[float, bool, str] | None:
     if rest[:1] in _MAGNITUDES and not _is_currency_mark(rest):
         rest = rest[1:].lstrip()
     unit, consumed = _percent_mark(rest, 0)
-    if not (
-        _is_currency_mark(rest[consumed:].strip())
-        and _is_currency_mark(field[: token.start].strip())
-    ):
+    tail = rest[consumed:].strip()
+    if not unit and tail in _MULTIPLE_MARKS:
+        # "5.5x": a multiple, written the way the answer writes it.
+        tail = ""
+    head = field[: token.start].strip()
+    lead = _sign_before_currency(field, token.start)
+    if lead is not None and not field[:lead].strip():
+        # "−$1,847.78": the sign stands outside the mark and is the number's.
+        head = field[lead + 1 : token.start].strip()
+    if not (_is_currency_mark(tail) and _is_currency_mark(head)):
         return None
     reading = _reading(token.sign, token.digits, unit)
     if reading is None:
@@ -578,19 +719,22 @@ def parse_figures_block(content: str) -> FiguresBlock:
     raw = "".join(content[start:end] for _, _, _, (start, end) in blocks)
     declarations: list[Declaration] = []
     malformed: list[tuple[int, str]] = []
+    # The prose decides whether "2,639" is a decimal; a declaration cell must agree
+    # with it. ``None`` (no document evidence) lets the cell speak for itself.
+    document_reading = _writes_decimal_commas(_normalize(content).text) or None
     for number, line in enumerate(raw.splitlines(), start=1):
         stripped = line.strip().replace("｜", "|")
         if not stripped:
             continue
-        parts = stripped.split("|")
+        # Four logical columns; a literal pipe may belong to the ref itself.
         if stripped.startswith("|"):
-            parts = parts[1:]
-        if len(parts) > 1 and stripped.endswith("|"):
-            parts = parts[:-1]
-        parts = [part.strip() for part in parts]
+            stripped = stripped[1:].lstrip()
+            if stripped.endswith("|"):
+                stripped = stripped[:-1].rstrip()
+        parts = [part.strip() for part in stripped.split("|", 3)]
         if _is_header_or_rule(parts):
             continue
-        parsed = _parse_value(parts[0]) if parts else None
+        parsed = _parse_value(parts[0], document_reading) if parts else None
         role = parts[1].casefold() if len(parts) > 1 else ""
         if parsed is None or role not in ROLES:
             malformed.append((number, line.strip()[:120]))
@@ -691,6 +835,31 @@ def table_rows(content: str) -> list[TableRow]:
             (position for position, name in enumerate(headers) if name in _SYMBOL_HEADERS),
             None,
         )
+        # A square matrix may use an empty corner and its first column as
+        # the row axis. Infer this identity only for complete, unique axes.
+        if symbol_column is None and len(headers) > 2 and not headers[0].strip():
+            axis = [name.strip().upper() for name in headers[1:]]
+            body = [
+                _table_cells(positions[k][0], positions[k][1])
+                for k in range(block_start + 1, index)
+            ]
+            body = [cells for cells in body if cells and not _is_separator_row(cells)]
+            row_axis = [
+                re.sub(r"^(?:\*\*|__)(.*?)(?:\*\*|__)$", r"\1", cells[0][0])
+                .strip()
+                .upper()
+                for cells in body
+                if len(cells) == len(headers)
+            ]
+            if (
+                len(body) == len(axis) == len(row_axis)
+                and all(len(cells) == len(headers) for cells in body)
+                and all(re.fullmatch(r"[A-Z][A-Z0-9.]{0,19}", x) for x in axis)
+                and len(set(axis)) == len(axis)
+                and len(set(row_axis)) == len(row_axis)
+                and set(axis) == set(row_axis)
+            ):
+                symbol_column = 0
         for line_index in range(block_start + 1, index):
             cells = _table_cells(positions[line_index][0], positions[line_index][1])
             if not cells or _is_separator_row(cells):
@@ -744,6 +913,45 @@ def _currency_after(text: str, end: int) -> bool:
             break
         code += char
     return code.upper() in _CURRENCY_CODES
+
+
+def _currency_code_for_figure(text: str, start: int, end: int) -> str | None:
+    """Identify an unambiguous currency immediately adjacent to a number."""
+    head = text[:start].rstrip()
+    tail = text[end:].lstrip()
+
+    # Explicit ISO currency codes take precedence.
+    prefix = _code_before(head)
+    if prefix:
+        return {"CNH": "CNY", "RMB": "CNY"}.get(prefix, prefix)
+
+    suffix = ""
+    for char in tail:
+        if not char.isascii() or not char.isalpha():
+            break
+        suffix += char
+
+    if suffix.upper() in _CURRENCY_CODES:
+        code = suffix.upper()
+        return {"CNH": "CNY", "RMB": "CNY"}.get(code, code)
+
+    # Only unambiguous symbols and words can establish currency identity.
+    if head.endswith("€") or tail.startswith("€"):
+        return "EUR"
+    if head.endswith("£") or tail.startswith("£"):
+        return "GBP"
+    if head.endswith("₩") or tail.startswith("₩"):
+        return "KRW"
+    if head.endswith("₹") or tail.startswith("₹"):
+        return "INR"
+    # Match complete currency units, not the opening of an unrelated word.
+    word = _cjk_run(tail)
+    if word in {"人民币", "美元", "円"}:
+        return {"人民币": "CNY", "美元": "USD", "円": "JPY"}[word]
+    if tail.startswith("원") and (len(tail) == 1 or not tail[1].isalpha()):
+        return "KRW"
+
+    return None
 
 
 def magnitude_suffix(text: str, end: int) -> tuple[float, int]:
@@ -967,8 +1175,10 @@ def scan_figures(content: str, block: FiguresBlock) -> list[Figure]:
         cell = next((entry for entry in cells if entry[0] <= start and end <= entry[1]), None)
         row, position = (cell[2], cell[3]) if cell else (None, None)
         structural = row is not None and position in (row.date_column, row.symbol_column)
-        currency = _currency_before(text, token.start) or _currency_after(text, token.end)
-        marked = percent or currency or "." in token.digits
+        currency_end = magnitude_suffix(text, token.end)[1]
+        currency = _currency_before(text, token.start) or _currency_after(text, currency_end)
+        currency_code = _currency_code_for_figure(text, token.start, currency_end)
+        marked = percent or currency or "." in token.digits or token.grouped
         # A cell that also holds a word is prose set in a table: its plain
         # integer is a count or a horizon, as it would be in a sentence (#1471).
         worded = (
@@ -992,7 +1202,14 @@ def scan_figures(content: str, block: FiguresBlock) -> list[Figure]:
                 date_value = row.cells[row.date_column][0] or None
             if row.symbol_column is not None and row.symbol_column < len(row.cells):
                 symbol_value = row.cells[row.symbol_column][0] or None
+                if symbol_value:
+                    symbol_value = re.sub(
+                        r"^(?:\*\*|__)(.*?)(?:\*\*|__)$", r"\1", symbol_value
+                    ).strip()
         mark_end = _currency_suffix_end(text, magnitude_suffix(text, unit_end)[1])
+        # A sign written before the currency mark is cut with the figure.
+        lead = _sign_before_currency(text, token.start) if token.sign else None
+        prefix_start = lead if lead is not None else _currency_prefix_start(text, token.start)
         figures.append(
             Figure(
                 text=content[start:end],
@@ -1007,9 +1224,10 @@ def scan_figures(content: str, block: FiguresBlock) -> list[Figure]:
                 symbol=symbol_value,
                 scale=1.0 if percent else magnitude_suffix(text, token.end)[0],
                 currency=currency,
+                currency_code=currency_code,
                 digits=token.digits,
                 sign=token.sign,
-                extent=(view.start(_currency_prefix_start(text, token.start)), view.end(mark_end)),
+                extent=(view.start(prefix_start), view.end(mark_end)),
                 fence=next(
                     (info for low, high, info, _ in fences if low <= start and digits_end <= high),
                     None,

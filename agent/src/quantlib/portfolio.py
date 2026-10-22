@@ -7,7 +7,6 @@ Implements Marcos López de Prado's (2016) Hierarchical Risk Parity algorithm:
 """
 
 
-
 import numpy as np
 import pandas as pd
 from scipy.cluster.hierarchy import linkage
@@ -83,9 +82,13 @@ def inverse_variance_weights(cov: pd.DataFrame | np.ndarray) -> np.ndarray:
     if c.ndim != 2 or c.shape[0] != c.shape[1]:
         raise ValueError("Covariance matrix must be square 2-D")
     variances = np.diag(c)
-    if np.any(variances <= 0.0):
-        raise ValueError("All asset variances on the diagonal must be strictly positive")
-    inv_var = 1.0 / variances
+    if not np.isfinite(variances).all() or np.any(variances <= 0.0):
+        raise ValueError(
+            "All asset variances on the diagonal must be finite and strictly positive"
+        )
+    # Scaling by the smallest variance cancels during normalization and avoids
+    # overflow in 1 / variance for valid subnormal positive variances.
+    inv_var = variances.min() / variances
     return inv_var / np.sum(inv_var)
 
 
@@ -116,6 +119,13 @@ def hierarchical_risk_parity(
     """
     is_df = isinstance(cov, pd.DataFrame)
     labels = cov.columns.tolist() if is_df else None
+    if is_df:
+        # The matrix is read positionally below, so a frame whose rows are in
+        # another order than its columns is the same misalignment as a
+        # reordered corr: align it by label, reject a different label set.
+        if set(cov.index) != set(labels):
+            raise ValueError("Covariance matrix row labels must match its column labels")
+        cov = cov.loc[labels, labels]
 
     cov_mat = np.asarray(cov, dtype=float)
     if cov_mat.ndim != 2 or cov_mat.shape[0] != cov_mat.shape[1]:
@@ -123,18 +133,25 @@ def hierarchical_risk_parity(
     n = cov_mat.shape[0]
     if n == 0:
         raise ValueError("Covariance matrix cannot be empty")
+    diag = np.diag(cov_mat)
+    if not np.isfinite(diag).all() or np.any(diag <= 0.0):
+        raise ValueError("Diagonal variances must be finite and strictly positive")
     if n == 1:
         return pd.Series([1.0], index=labels) if is_df else np.array([1.0])
-
-    diag = np.diag(cov_mat)
-    if np.any(diag <= 0.0):
-        raise ValueError("Diagonal variances must be strictly positive")
 
     if corr is None:
         std = np.sqrt(diag)
         corr_mat = cov_mat / np.outer(std, std)
     else:
+        if is_df and isinstance(corr, pd.DataFrame):
+            if set(corr.index) != set(labels) or set(corr.columns) != set(labels):
+                raise ValueError(
+                    "Correlation matrix labels must match covariance labels"
+                )
+            corr = corr.loc[labels, labels]
         corr_mat = np.asarray(corr, dtype=float)
+        if corr_mat.shape != cov_mat.shape:
+            raise ValueError("Correlation matrix dimensions must match covariance matrix")
 
     dist = correlation_distance(corr_mat)
     # Scipy linkage expects condensed distance or observation matrix

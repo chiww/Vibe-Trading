@@ -10,12 +10,13 @@ import {
   type StoredAgentMessage,
 } from "@/stores/agent";
 import { useSSE } from "@/hooks/useSSE";
-import { ApiError, AUTH_REQUIRED_MESSAGE, api, isAuthRequiredError, type GoalSnapshot, type MandateProposal, type MandateCommitted, type ScheduledResearchProposal, type LiveAction, type LiveHalted, type LLMSettings } from "@/lib/api";
+import { useLlmUsageCounter } from "@/hooks/useLlmUsageCounter";
+import { ApiError, AUTH_REQUIRED_MESSAGE, api, isAuthRequiredError, type GoalSnapshot, type MandateProposal, type MandateCommitted, type ScheduledResearchProposal, type LiveAction, type LiveHalted, type LLMSettings, type RunPreview } from "@/lib/api";
 import {
   extractUploadedAttachments,
-  prependUploadedAttachments,
 } from "@/lib/attachments";
-import { isReportWorthyRun } from "@/lib/runReports";
+import { hasStoredMetrics, runCardFields } from "@/lib/runCards";
+import { buildChatPrompt, MAX_GOAL_CHARS, MAX_MESSAGE_CHARS, promptExceedsLimit, SWARM_PROMPT_PREFIX } from "@/lib/chatPrompt";
 import type { AgentMessage, SwarmRunStatus, ToolCallEntry } from "@/types/agent";
 import { AgentAvatar } from "@/components/chat/AgentAvatar";
 import { WelcomeScreen } from "@/components/chat/WelcomeScreen";
@@ -24,6 +25,7 @@ import { ModelRuntimeBar } from "@/components/chat/ModelRuntimeBar";
 import { ThinkingTimeline } from "@/components/chat/ThinkingTimeline";
 import { ConversationTimeline } from "@/components/chat/ConversationTimeline";
 import { ActivityLine } from "@/components/chat/ActivityLine";
+import { LlmUsageCounter } from "@/components/chat/LlmUsageCounter";
 import { MandateProposalCard } from "@/components/chat/MandateProposalCard";
 import { ScheduledResearchProposalCard } from "@/components/chat/ScheduledResearchProposalCard";
 import { SwarmStatusCard } from "@/components/chat/SwarmStatusCard";
@@ -40,8 +42,10 @@ import {
 } from "@/components/chat/LiveRuntimePanel";
 import {
   applySwarmEvent,
+  buildSwarmStatusFromRunDetail,
   buildSwarmStatusFromStarted,
   buildSwarmStatusFromToolResultPreview,
+  mergeSwarmRunUsage,
 } from "@/lib/swarmStatus";
 import { buildToolTimelineMessages } from "@/pages/agentToolTimeline";
 
@@ -75,6 +79,15 @@ function groupMessages(msgs: StoredAgentMessage[]): MsgGroup[] {
 }
 
 const act = () => useAgentStore.getState();
+
+function hydrateSwarmRunUsage(runId: string): void {
+  void api.getSwarmRun(runId).then((payload) => {
+    const current = act().swarmRuns[runId]
+      ?? buildSwarmStatusFromRunDetail(payload, runId);
+    if (!current) return;
+    act().upsertSwarmStatus(mergeSwarmRunUsage(current, payload));
+  }).catch(() => undefined);
+}
 
 function eventCallId(data: Record<string, unknown>): string | undefined {
   return typeof data.call_id === "string" && data.call_id
@@ -110,8 +123,6 @@ function toolProgressKey(callId: string | undefined, tool: string): string {
 
 const STREAM_FLUSH_INTERVAL_MS = 80;
 const TIMELINE_WINDOW_SIZE = 160;
-const SWARM_PROMPT_PREFIX =
-  "[Swarm Team Mode] Use the swarm tool to assemble the best specialist team for this task. Auto-select the most appropriate preset.\n\n";
 const GOAL_KICKOFF_PREFIX = [
   "Start working on this research goal now.",
   "Keep it research-only, use available tools when evidence is needed, add concrete evidence to the goal ledger, and keep going until the goal is complete, blocked, waiting for user input, or budget-limited.",
@@ -246,6 +257,7 @@ export function Agent() {
   const replayCheckTimerRef = useRef(0);
   const smoothScrollingRef = useRef(false);
   const smoothScrollTimerRef = useRef(0);
+  const historyScrollTimerRef = useRef(0);
   const titleBeforeCompletionRef = useRef<string | null>(null);
   const completedAttemptIdsRef = useRef<Set<string>>(new Set());
 
@@ -259,6 +271,7 @@ export function Agent() {
   const [visibleRowCount, setVisibleRowCount] = useState(TIMELINE_WINDOW_SIZE);
   const visibleRowsSessionRef = useRef<string | null>(null);
   const [llmSettings, setLlmSettings] = useState<LLMSettings | null>(null);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [runtimeIdentity, setRuntimeIdentity] = useState<RuntimeIdentity>({});
 
   const messages = useAgentStore(s => s.messages);
@@ -272,6 +285,14 @@ export function Agent() {
   const previousStatusRef = useRef(status);
 
   const { connect, disconnect, onStatusChange } = useSSE();
+
+  /* Live token totals for the in-flight attempt, fed by `llm_usage` events. */
+  const {
+    input: usageInput,
+    output: usageOutput,
+    record: recordLlmUsage,
+    reset: resetLlmUsage,
+  } = useLlmUsageCounter();
 
   const urlSessionId = searchParams.get("session");
   const visibleRuntimeIdentity = runtimeIdentity.sessionId === urlSessionId
@@ -319,6 +340,14 @@ export function Agent() {
       }
     });
   }, [isNearBottom]);
+
+  const scheduleHistoryScroll = useCallback(() => {
+    window.clearTimeout(historyScrollTimerRef.current);
+    historyScrollTimerRef.current = window.setTimeout(() => {
+      historyScrollTimerRef.current = 0;
+      forceScrollToBottom();
+    }, 50);
+  }, [forceScrollToBottom]);
 
   const flushPendingStreamUpdate = useCallback(() => {
     window.clearTimeout(streamFlushTimerRef.current);
@@ -487,6 +516,7 @@ export function Agent() {
   const doDisconnect = useCallback(() => {
     cancelPendingStreamFlush();
     window.clearTimeout(replayCheckTimerRef.current);
+    window.clearTimeout(historyScrollTimerRef.current);
     disconnect();
     sseSessionRef.current = null;
   }, [cancelPendingStreamFlush, disconnect]);
@@ -513,9 +543,21 @@ export function Agent() {
   }, []);
 
   const loadSessionMessages = useCallback(async (sid: string, gen: number) => {
+    setHistoryError(null);
     try {
       const msgs = await api.getSessionMessages(sid);
       if (genRef.current !== gen) return;
+      // Every assistant turn owns a run directory, so most of these are plain
+      // replies. Request all previews up front rather than one per message.
+      const previews = new Map<string, Promise<RunPreview | null>>();
+      for (const m of msgs) {
+        const meta = m.metadata as Record<string, unknown> | undefined;
+        const runId = meta?.run_id as string | undefined;
+        const metrics = meta?.metrics as Record<string, number> | undefined;
+        if (m.role !== "user" && runId && !hasStoredMetrics(metrics) && !previews.has(runId)) {
+          previews.set(runId, api.getRunPreview(runId).catch(() => null));
+        }
+      }
       const agentMsgs: StoredAgentMessage[] = [];
       let latestRuntimeIdentity: RuntimeIdentity | null = null;
       for (const m of msgs) {
@@ -584,35 +626,12 @@ export function Agent() {
           if (m.content && m.content !== "Strategy execution completed.") {
             agentMsgs.push({ id: m.message_id + "_ans", type: "answer", content: m.content, elapsed_ms: elapsedMs, timestamp: assistantTs });
           }
-          if (metrics && Object.keys(metrics).length > 0) {
+          if (hasStoredMetrics(metrics)) {
             agentMsgs.push({ id: m.message_id, type: "run_complete", content: "", runId, metrics, timestamp: assistantTs + 1 });
           } else {
-            // Fetch run data to check report-worthiness; show fallback card if fetch fails
-            let fetchedMetrics: Record<string, number> | undefined;
-            let fetchedCurve: Array<{ time: string; equity: number }> | undefined;
-            let showCard = false;
-            try {
-              const runData = await api.getRun(runId);
-              if (isReportWorthyRun(runData)) {
-                fetchedMetrics = runData.metrics;
-                fetchedCurve = runData.equity_curve?.map((e) => ({ time: e.time, equity: Number(e.equity) }));
-                showCard = true;
-              }
-              // succeeded but not report-worthy (plain chat turn) → skip card
-            } catch {
-              // fetch failed (auth/404/network) → can't tell, show link as fallback
-              showCard = true;
-            }
-            if (showCard) {
-              agentMsgs.push({
-                id: m.message_id,
-                type: "run_complete",
-                content: "",
-                runId,
-                metrics: fetchedMetrics,
-                equityCurve: fetchedCurve,
-                timestamp: assistantTs + 1,
-              });
+            const card = runCardFields((await previews.get(runId)) ?? null);
+            if (card) {
+              agentMsgs.push({ id: m.message_id, type: "run_complete", content: "", runId, ...card, timestamp: assistantTs + 1 });
             }
           }
         } else {
@@ -656,13 +675,14 @@ export function Agent() {
       act().setSessionLoading(false);
       act().cacheSession(sid, agentMsgs);
       setRuntimeIdentity(latestRuntimeIdentity ?? {});
-      setTimeout(() => forceScrollToBottom(), 50);
-    } catch {
+      scheduleHistoryScroll();
+    } catch (error) {
       if (genRef.current !== gen) return;
       setRuntimeIdentity({});
       act().setSessionLoading(false);
+      setHistoryError(error instanceof Error ? error.message : t("settings.unknownError"));
     }
-  }, [forceScrollToBottom]);
+  }, [scheduleHistoryScroll, t]);
 
   const refreshSessionMessages = useCallback(async (sid: string) => {
     const gen = genRef.current + 1;
@@ -750,6 +770,17 @@ export function Agent() {
         if (act().status !== "streaming") act().setStatus("streaming");
         queueStreamUpdate(String(d.delta || ""), false);
       },
+      llm_waiting: (d) => {
+        touch();
+        replayAttemptSeenRef.current = true;
+        identifyActivity(d, "thinking");
+      },
+      llm_usage: (d) => {
+        touch();
+        replayAttemptSeenRef.current = true;
+        recordLlmUsage(String(d.attempt_id || ""), Number(d.iter || 0), d);
+      },
+
       reasoning_delta: (d) => {
         touch();
         replayAttemptSeenRef.current = true;
@@ -826,6 +857,7 @@ export function Agent() {
           const fallback = buildSwarmStatusFromToolResultPreview(String(d.preview || ""));
           if (fallback && !act().swarmRuns[fallback.runId]) {
             act().upsertSwarmStatus(fallback);
+            hydrateSwarmRunUsage(fallback.runId);
           }
         }
       },
@@ -1027,24 +1059,12 @@ export function Agent() {
 
         // Show RunCompleteCard when the turn produced backtest metrics or a shadow report
         if (runId) {
-          let runMetrics: Record<string, number> | undefined;
-          let runCurve: Array<{ time: string; equity: number }> | undefined;
-          let showCard = false;
-          try {
-            const runData = await api.getRun(runId);
-            if (isReportWorthyRun(runData)) {
-              runMetrics = runData.metrics;
-              runCurve = runData.equity_curve?.map(e => ({ time: e.time, equity: Number(e.equity) }));
-              showCard = true;
-            }
-          } catch {
-            showCard = true; // fetch failed → show link as fallback
-          }
-          if (showCard || shadowId) {
+          const card = runCardFields(await api.getRunPreview(runId).catch(() => null));
+          if (card || shadowId) {
             s.addMessage({
               id: "", type: "run_complete", content: "", runId,
-              metrics: showCard ? runMetrics : undefined,
-              equityCurve: showCard ? runCurve : undefined,
+              metrics: card?.metrics,
+              equityCurve: card?.equityCurve,
               shadowId,
               timestamp: Date.now(),
             });
@@ -1271,6 +1291,7 @@ export function Agent() {
     loadGoalSnapshot,
     markBackgroundCompletion,
     queueStreamUpdate,
+    recordLlmUsage,
     scrollToBottom,
   ]);
 
@@ -1292,7 +1313,7 @@ export function Agent() {
       const cached = getCachedSession(urlSessionId);
       switchSession(urlSessionId, cached);
       if (cached) {
-        setTimeout(() => forceScrollToBottom(), 50);
+        scheduleHistoryScroll();
       }
       // Cached rows provide an instant shell; REST remains authoritative for a
       // turn that completed while this session was off-screen.
@@ -1331,12 +1352,19 @@ export function Agent() {
       doDisconnect();
       setRuntimeIdentity({});
       setGroundingRevision(null);
+      setHistoryError(null);
       setLiveItems([]);
       liveRuntimeRef.current?.resetSession();
       if (curSid && curMsgs.length > 0) cacheSession(curSid, curMsgs);
       reset();
     }
-  }, [urlSessionId, doDisconnect, loadSessionMessages, setupSSE, forceScrollToBottom]);
+  }, [urlSessionId, doDisconnect, loadSessionMessages, setupSSE, scheduleHistoryScroll]);
+
+  /* The live token counter belongs to one session; zero it on a real switch,
+     not on callback-identity churn of the rehydration effect above. */
+  useEffect(() => {
+    resetLlmUsage();
+  }, [sessionId, resetLlmUsage]);
 
   useEffect(() => {
     if (!sessionId) {
@@ -1351,6 +1379,8 @@ export function Agent() {
   }, [sessionId, loadGoalSnapshot]);
 
   useEffect(() => () => {
+    // Invalidate pending history loads before they can schedule another scroll.
+    genRef.current += 1;
     doDisconnect();
     cancelAnimationFrame(progressRafRef.current);
     pendingProgressRef.current.clear();
@@ -1409,6 +1439,13 @@ export function Agent() {
     attachments: ComposerAttachment[] = [],
   ) => {
     if ((!prompt.trim() && attachments.length === 0) || status === "streaming") return;
+    const finalPrompt = buildChatPrompt(prompt, attachments, Boolean(swarmPreset));
+    const limit = goalComposerActive ? MAX_GOAL_CHARS : MAX_MESSAGE_CHARS;
+    if (promptExceedsLimit(goalComposerActive ? prompt : finalPrompt, limit)) {
+      toast.error(t('agent.messageTooLong', { limit: limit.toLocaleString() }));
+      composerRef.current?.fill(prompt);
+      return;
+    }
     clearStreamingView();
 
     if (goalComposerActive) {
@@ -1446,7 +1483,6 @@ export function Agent() {
       return;
     }
 
-    let finalPrompt = prompt;
     const displayPrompt = toDisplayPrompt(prompt);
     const messageMeta: AgentMessageMeta = { ...displayPrompt.meta };
 
@@ -1454,12 +1490,10 @@ export function Agent() {
     if (swarmPreset) {
       messageMeta.swarmMode = true;
       setSwarmPreset(null);
-      finalPrompt = `${SWARM_PROMPT_PREFIX}${prompt}`;
     }
 
     if (attachments.length > 0) {
       messageMeta.attachments = attachments.map(({ filename }) => ({ filename }));
-      finalPrompt = prependUploadedAttachments(finalPrompt, attachments);
     }
     messageMeta.requestText = finalPrompt;
     act().addMessage({
@@ -1492,7 +1526,8 @@ export function Agent() {
     } catch (error) {
       archiveActivity("failed");
       act().setStatus("error");
-      const message = isAuthRequiredError(error) ? AUTH_REQUIRED_MESSAGE : t('agent.failedToSend');
+      const message = isAuthRequiredError(error) ? AUTH_REQUIRED_MESSAGE
+        : error instanceof ApiError && ['message_too_long', 'network_error', 'request_timeout'].includes(error.code || '') ? error.message : t('agent.failedToSend');
       toast.error(message);
       act().addMessage({ id: "", type: "error", content: message, timestamp: Date.now() });
     }
@@ -1768,6 +1803,16 @@ export function Agent() {
         runtimeModel={visibleRuntimeIdentity.model}
         runtimeReasoningEffort={visibleRuntimeIdentity.reasoningEffort}
       />
+      {historyError && (
+        <div role="alert" className="flex flex-wrap items-center gap-2 border-b border-warning/30 bg-warning/10 px-4 py-2 text-xs">
+          <span>{t("layout.sessionsLoadFailed")} {historyError}</span>
+          <button type="button" onClick={() => {
+            if (!sessionId) return;
+            act().setSessionLoading(true);
+            void refreshSessionMessages(sessionId);
+          }} className="ms-auto rounded-md border px-2 py-1">{t("connection.retry")}</button>
+        </div>
+      )}
       <div
         ref={listRef}
         data-streaming={status === "streaming" ? "true" : undefined}
@@ -1792,7 +1837,7 @@ export function Agent() {
               ))}
             </div>
           )}
-          {!sessionLoading && messages.length === 0 && (
+          {!sessionLoading && !historyError && messages.length === 0 && (
             // my-auto (not justify-*) centers the hero vertically while staying
             // scroll-reachable once the example library expands past the viewport.
             <div className="msg-enter my-auto">
@@ -1890,6 +1935,7 @@ export function Agent() {
               <AgentAvatar />
               <div className="flex-1 min-w-0 space-y-2">
                 {activity && <ActivityLine activity={activity} reasoningTail={reasoningTail} />}
+                <LlmUsageCounter input={usageInput} output={usageOutput} />
                 {groundingRound !== null && (
                   <p
                     role="status"

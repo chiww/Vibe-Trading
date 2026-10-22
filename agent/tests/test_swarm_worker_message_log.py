@@ -57,7 +57,7 @@ class _ScriptedLLM:
             ),
         ]
 
-    def stream_chat(self, messages, tools=None, timeout=None, on_text_chunk=None):
+    def stream_chat(self, messages, tools=None, timeout=None, on_text_chunk=None, on_waiting_chunk=None):
         return self._responses.pop(0)
 
     def close(self) -> None:
@@ -70,7 +70,7 @@ class _ContentFilteredLLM:
     def __init__(self) -> None:
         self._remaining = 20
 
-    def stream_chat(self, messages, tools=None, timeout=None, on_text_chunk=None):
+    def stream_chat(self, messages, tools=None, timeout=None, on_text_chunk=None, on_waiting_chunk=None):
         self._remaining -= 1
         if self._remaining >= 0:
             return LLMResponse(content="", content_filter_triggered=True)
@@ -83,7 +83,7 @@ class _ContentFilteredLLM:
 class _AnswersWithoutToolCallsLLM:
     """A final answer and nothing else, for a data agent that never probed."""
 
-    def stream_chat(self, messages, tools=None, timeout=None, on_text_chunk=None):
+    def stream_chat(self, messages, tools=None, timeout=None, on_text_chunk=None, on_waiting_chunk=None):
         return LLMResponse(
             content="The market looks range-bound, so no further analysis is needed.",
             tool_calls=[],
@@ -134,7 +134,7 @@ def test_completed_run_persists_the_message_log(
 ) -> None:
     """A worker that completes must leave a message log, not only a summary."""
     result = _run_worker_to_terminal(tmp_path, monkeypatch)
-    artifact_dir = agent_artifact_dir(tmp_path, "analyst")
+    artifact_dir = agent_artifact_dir(tmp_path, "analyst", "task")
 
     assert result.status == "completed", result.error
     assert (artifact_dir / "summary.md").is_file()
@@ -147,7 +147,7 @@ def test_token_limit_run_persists_the_message_log(
     """A worker stopped by the token limit must leave a message log too."""
     monkeypatch.setattr(worker_mod, "_MAX_TOKEN_ESTIMATE", 0)
     result = _run_worker_to_terminal(tmp_path, monkeypatch)
-    artifact_dir = agent_artifact_dir(tmp_path, "analyst")
+    artifact_dir = agent_artifact_dir(tmp_path, "analyst", "task")
 
     assert result.status == "token_limit"
     assert (artifact_dir / "summary.md").is_file()
@@ -164,7 +164,7 @@ def test_content_filter_circuit_breaker_persists_the_message_log(
         llm_factory=_ContentFilteredLLM,
         max_iterations=20,
     )
-    artifact_dir = agent_artifact_dir(tmp_path, "analyst")
+    artifact_dir = agent_artifact_dir(tmp_path, "analyst", "task")
 
     assert result.status == "failed"
     assert "circuit_breaker" in (result.error or "")
@@ -179,7 +179,7 @@ def test_incomplete_run_persists_the_message_log(
     result = _run_worker_to_terminal(
         tmp_path, monkeypatch, llm_factory=_AnswersWithoutToolCallsLLM
     )
-    artifact_dir = agent_artifact_dir(tmp_path, "analyst")
+    artifact_dir = agent_artifact_dir(tmp_path, "analyst", "task")
 
     assert result.status == "incomplete", result.error
     assert "no tool calls" in (result.error or "")
@@ -192,7 +192,7 @@ def test_message_log_carries_the_tool_call_arguments(
 ) -> None:
     """The log must hold what the model asked the tool for, not only roles."""
     _run_worker_to_terminal(tmp_path, monkeypatch)
-    log_path = agent_artifact_dir(tmp_path, "analyst") / "messages.json"
+    log_path = agent_artifact_dir(tmp_path, "analyst", "task") / "messages.json"
     messages = json.loads(log_path.read_text(encoding="utf-8"))
 
     assert any(

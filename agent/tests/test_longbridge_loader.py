@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 
 from backtest.loaders import longbridge as loader_mod
+from tests.loader_contract import assert_loader_contract
 from backtest.loaders.base import NoAvailableSourceError
 from src.trading.connectors.longbridge import credentials as lb_credentials
 
@@ -191,8 +192,24 @@ def _configured_loader() -> loader_mod.LongbridgeLoader:
     return loader
 
 
+class _FactoryOnlyConfig:
+    """Mimics SDK 4.0+: ``Config(...)`` is refused, only ``from_apikey`` works."""
+
+    def __new__(cls, *args: object, **kwargs: object) -> "_FactoryOnlyConfig":
+        raise TypeError("cannot create 'builtins.Config' instances")
+
+    @staticmethod
+    def from_apikey(*args: str) -> tuple[str, ...]:
+        return args
+
+
+@pytest.mark.parametrize(
+    "config_cls",
+    [lambda *args: args, _FactoryOnlyConfig],
+    ids=["sdk-0.2-constructor", "sdk-4-from_apikey"],
+)
 def test_fetch_combines_all_windows_and_caches_complete_frame(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, config_cls: object
 ) -> None:
     calls: list[tuple[dt.date, dt.date]] = []
     cached: list[pd.DataFrame] = []
@@ -226,7 +243,7 @@ def test_fetch_combines_all_windows_and_caches_complete_frame(
             ]
 
     fake_openapi = SimpleNamespace(
-        Config=lambda *args: args,
+        Config=config_cls,
         QuoteContext=FakeQuoteContext,
         Period=SimpleNamespace(Day="day"),
         AdjustType=SimpleNamespace(NoAdjust="none"),
@@ -249,6 +266,7 @@ def test_fetch_combines_all_windows_and_caches_complete_frame(
     ]
     assert list(result) == ["AAPL"]
     assert len(result["AAPL"]) == 2
+    assert_loader_contract(result["AAPL"], context="longbridge daily")
     assert len(cached) == 1
     pd.testing.assert_frame_equal(cached[0], result["AAPL"])
 
@@ -324,7 +342,9 @@ def test_fetch_redacts_sdk_initialization_exception_and_drops_cause(
     with pytest.raises(NoAvailableSourceError) as exc_info:
         _configured_loader().fetch(["AAPL"], "2026-01-01", "2026-01-02")
 
-    assert str(exc_info.value) == "Longbridge SDK initialization failed."
+    assert str(exc_info.value) == (
+        "Longbridge SDK initialization failed (SecretBearingSdkError)."
+    )
     assert secret not in str(exc_info.value)
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None

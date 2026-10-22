@@ -32,6 +32,24 @@ logger = logging.getLogger(__name__)
 _GBP_PENCE_CURRENCY = "GBp"
 _PRICE_COLUMNS = ("open", "high", "low", "close")
 _UK_EQUITY_PATTERN = re.compile(r"^[A-Z0-9&.\-]+\.L$", re.I)
+# Venues that list lines in a second currency, whose market is one static
+# pool in the first. BYMA quotes GGAL.BA in ARS and GGALD.BA in USD (the
+# trailing D is not a rule: YPFD.BA is a peso line); the TSX quotes DLR.TO in
+# CAD and DLR-U.TO in USD. Yahoo declares each, and every priced source in
+# these markets' chains is Yahoo or yfinance, so the declared currency decides.
+_SINGLE_CURRENCY_VENUES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"^[A-Z0-9&.\-]+\.BA$", re.I), "ARS"),
+    (re.compile(r"^[A-Z0-9]+\.SA$", re.I), "BRL"),
+    (re.compile(r"^[A-Z0-9&.\-]+\.(?:TO|V)$", re.I), "CAD"),
+)
+
+
+def _venue_currency(code: str) -> str | None:
+    """Return the one currency a symbol's venue pool accepts, or None if unconstrained."""
+    code = str(code).strip()
+    return next(
+        (cur for pattern, cur in _SINGLE_CURRENCY_VENUES if pattern.match(code)), None
+    )
 
 
 def is_lse_symbol(code: str) -> bool:
@@ -67,6 +85,48 @@ def scale_pence_to_currency(
     return scaled, "GBp→GBP (÷100)"
 
 
+def declared_currency_required(code: str) -> bool:
+    """Return whether ``code``'s suffix names a venue that quotes in several currencies.
+
+    A loader must read the source's declared currency for such a symbol and
+    pass it to :func:`normalize_declared_quote_currency` before emitting bars.
+    """
+    return is_lse_symbol(code) or _venue_currency(code) is not None
+
+
+def normalize_declared_quote_currency(
+    frame: pd.DataFrame, code: str, currency: str | None
+) -> pd.DataFrame:
+    """Hold a frame to its market's currency contract and record the declared quote.
+
+    Args:
+        frame: Normalized OHLCV frame.
+        code: The project symbol the frame belongs to.
+        currency: Quote currency declared by the source, if any.
+
+    Returns:
+        The frame with ``attrs["quote_currency"]`` set whenever a currency was
+        declared (GBP for an LSE line after pence scaling).
+
+    Raises:
+        ValueError: If an LSE line is not declared GBP/GBp, or a BYMA / TSX
+            line is not declared in its market's currency -- each would enter a
+            single-currency pool in the wrong unit.
+    """
+    if is_lse_symbol(code):
+        return normalize_lse_quote_currency(frame, currency)
+    declared = currency.strip() if isinstance(currency, str) else ""
+    required = _venue_currency(code)
+    if required is not None and declared != required:
+        raise ValueError(
+            f"{code} must be quoted in {required} to enter that market's pool; "
+            f"the source declared {declared or 'no currency'!r}"
+        )
+    if declared:
+        frame.attrs["quote_currency"] = declared
+    return frame
+
+
 def normalize_lse_quote_currency(
     frame: pd.DataFrame, currency: str | None
 ) -> pd.DataFrame:
@@ -95,8 +155,7 @@ def normalize_lse_quote_currency(
     else:
         label = declared or "missing"
         raise ValueError(
-            "LSE quote currency must be declared as GBP or GBp; "
-            f"got {label!r}"
+            "LSE quote currency must be declared as GBP or GBp; " f"got {label!r}"
         )
 
     normalized.attrs["quote_currency"] = "GBP"
@@ -122,7 +181,9 @@ def validate_date_range(start_date: str, end_date: str) -> None:
         start = pd.Timestamp(start_date)
         end = pd.Timestamp(end_date)
     except Exception as exc:
-        raise ValueError(f"Invalid date format: start={start_date!r}, end={end_date!r}") from exc
+        raise ValueError(
+            f"Invalid date format: start={start_date!r}, end={end_date!r}"
+        ) from exc
     if start > end:
         raise ValueError(f"start_date ({start_date}) > end_date ({end_date})")
 
@@ -175,11 +236,7 @@ def validate_ohlc(
 
     open_, high, low, close = (frame[c] for c in required)
     structural = (
-        (high < low)
-        | (high < open_)
-        | (high < close)
-        | (low > open_)
-        | (low > close)
+        (high < low) | (high < open_) | (high < close) | (low > open_) | (low > close)
     )
     if allow_nonpositive_prices:
         nonpositive = (open_ == 0) | (high == 0) | (low == 0) | (close == 0)
@@ -193,7 +250,9 @@ def validate_ohlc(
     if strategy == "raise":
         raise ValueError(f"{n_invalid} bar(s) violate OHLC invariants")
     if strategy == "warn":
-        logger.warning("OHLC validation: %d bar(s) violate invariants (kept)", n_invalid)
+        logger.warning(
+            "OHLC validation: %d bar(s) violate invariants (kept)", n_invalid
+        )
         return frame
     logger.warning("OHLC validation: dropping %d invalid bar(s)", n_invalid)
     return frame[~invalid]
@@ -206,6 +265,85 @@ def validate_ohlc(
 
 DEFAULT_BACKOFF: tuple[float, ...] = (0.5, 1.5, 4.0)
 DEFAULT_MAX_RETRIES = 3
+
+
+#: Bar sizes built from daily bars instead of asked of a loader (#1479). Every
+#: source serves daily bars; few serve weekly or monthly, and those that do
+#: disagree on where a week ends and how its bar is adjusted, so one resample
+#: here keeps a weekly bar the same thing whichever source served the days. A
+#: bar covers one calendar week (Monday to Sunday) or month.
+RESAMPLED_INTERVALS = {"1W": "W-SUN", "1M": "M"}
+
+#: Columns a period bar sums. ``vwap`` is weighted by volume (NaN without a
+#: volume column), ``funding_rate`` (a per-settlement rate) is averaged,
+#: ``open``/``high``/``low`` take their own rule, and every other column is a
+#: level and takes the period's last value.
+_SUMMED_COLUMNS = frozenset({"volume", "amount"})
+
+
+def source_interval(interval: str) -> str:
+    """Return the bar size to request from a loader when serving ``interval``.
+
+    Args:
+        interval: The bar size the caller asked for.
+
+    Returns:
+        ``"1D"`` for a resampled interval, otherwise ``interval`` unchanged.
+    """
+    return "1D" if interval in RESAMPLED_INTERVALS else interval
+
+
+def resample_bars(frame: pd.DataFrame, interval: str) -> pd.DataFrame:
+    """Aggregate daily bars into ``interval`` bars.
+
+    Each bar is stamped with the last trading day inside its period, which is
+    when its close becomes known, so a signal on it never sees a later day and
+    a partial first or last period stays a bar dated inside that period.
+
+    Args:
+        frame: Daily bars on a ``DatetimeIndex``.
+        interval: A key of :data:`RESAMPLED_INTERVALS`; any other interval
+            returns ``frame`` unchanged.
+
+    Returns:
+        One row per period: first open, highest high, lowest low, last close,
+        summed volume and amount, volume-weighted vwap, mean funding rate, last
+        value of any other column. Frame attributes (quote currency) are kept.
+    """
+    if interval not in RESAMPLED_INTERVALS or frame.empty:
+        return frame
+    index = pd.DatetimeIndex(frame.index)
+    naive = index.tz_localize(None) if index.tz is not None else index
+    periods = naive.to_period(RESAMPLED_INTERVALS[interval])
+    grouped = frame.groupby(periods)
+    columns = {}
+    for column in frame.columns:
+        values = grouped[column]
+        if column == "open":
+            columns[column] = values.first()
+        elif column == "high":
+            columns[column] = values.max()
+        elif column == "low":
+            columns[column] = values.min()
+        elif column in _SUMMED_COLUMNS:
+            columns[column] = values.sum(min_count=1)
+        elif column == "funding_rate":
+            columns[column] = values.mean()
+        elif column == "vwap":
+            if "volume" in frame.columns:
+                traded = (
+                    (frame["vwap"] * frame["volume"]).groupby(periods).sum(min_count=1)
+                )
+                columns[column] = traded / grouped["volume"].sum(min_count=1)
+            else:
+                columns[column] = values.first() * float("nan")
+        else:
+            columns[column] = values.last()
+    out = pd.DataFrame(columns, columns=frame.columns)
+    stamps = pd.Series(index, index=periods).groupby(level=0).max()
+    out.index = pd.DatetimeIndex(stamps.loc[out.index], name=frame.index.name)
+    out.attrs = dict(frame.attrs)
+    return out
 
 
 def positive_env_int(name: str, default: int) -> int:
@@ -254,7 +392,11 @@ def check_budget(deadline: float, label: str, budget_s: float | None = None) -> 
             message when present.
     """
     if time.monotonic() > deadline:
-        suffix = f" exceeded {budget_s:.0f}s budget" if budget_s is not None else " exceeded budget"
+        suffix = (
+            f" exceeded {budget_s:.0f}s budget"
+            if budget_s is not None
+            else " exceeded budget"
+        )
         raise TimeoutError(f"{label}{suffix}")
 
 
@@ -313,7 +455,9 @@ def retry_with_budget(
                     f"{label} failed after {attempt + 1} attempt(s): {exc}"
                 ) from exc
             time.sleep(min(backoff[attempt], max(0.0, remaining)))
-    raise AssertionError("unreachable: retry loop must return or raise")  # pragma: no cover
+    raise AssertionError(
+        "unreachable: retry loop must return or raise"
+    )  # pragma: no cover
 
 
 # ---------------------------------------------------------------------------
@@ -332,8 +476,12 @@ _LOADER_CACHE_TRUE_VALUES = {"1", "true", "yes", "on"}
 # persisted. v5 USD/unknown .L entries must never be served as static GBP.
 # v7: tencent fqkline paginates backward (#1410) — entries cached under the
 # forward walk hold tail-truncated multi-year series and must never be served.
-_LOADER_CACHE_VERSION = 7
-_LOADER_FRAME_METADATA_ATTRS = ("quote_currency", "currency_conversion")
+# v8: FMP/Tiingo keep one adjusted/raw basis and cached frames retain their
+# actual adjustment stamp. Older entries may contain artificial return jumps.
+# v9: SEC successor/predecessor facts extend historical coverage. Old cached
+# panels may omit the predecessor's filings and must be rebuilt.
+_LOADER_CACHE_VERSION = 9
+_LOADER_FRAME_METADATA_ATTRS = ("quote_currency", "currency_conversion", "adjustment")
 
 
 def loader_cache_enabled() -> bool:
@@ -436,6 +584,7 @@ def loader_cache_get(
     start_date: str,
     end_date: str,
     fields: list[str] | tuple[str, ...] | None = None,
+    source_revision: str | None = None,
 ) -> pd.DataFrame | None:
     """Return a cached DataFrame for one payload, or ``None`` on any miss.
 
@@ -453,7 +602,7 @@ def loader_cache_get(
         end_date=end_date,
         fields=fields,
     )
-    return _read_loader_cache_frame(cache_path)
+    return _read_loader_cache_frame(cache_path, source_revision)
 
 
 def loader_cache_put(
@@ -465,6 +614,7 @@ def loader_cache_put(
     end_date: str,
     fields: list[str] | tuple[str, ...] | None,
     frame: pd.DataFrame | None,
+    source_revision: str | None = None,
 ) -> None:
     """Write one non-empty DataFrame to the cache; a no-op when not cacheable.
 
@@ -483,7 +633,7 @@ def loader_cache_put(
         end_date=end_date,
         fields=fields,
     )
-    _write_loader_cache_frame(cache_path, frame)
+    _write_loader_cache_frame(cache_path, frame, source_revision)
 
 
 def cached_loader_fetch(
@@ -495,6 +645,7 @@ def cached_loader_fetch(
     end_date: str,
     fields: list[str] | tuple[str, ...] | None,
     fetch: Callable[[], pd.DataFrame | None],
+    source_revision: str | None = None,
 ) -> pd.DataFrame | None:
     """Fetch one DataFrame through the opt-in local cache.
 
@@ -510,6 +661,7 @@ def cached_loader_fetch(
         start_date=start_date,
         end_date=end_date,
         fields=fields,
+        source_revision=source_revision,
     )
     if cached is not None:
         return cached
@@ -522,6 +674,7 @@ def cached_loader_fetch(
         start_date=start_date,
         end_date=end_date,
         fields=fields,
+        source_revision=source_revision,
         frame=frame,
     )
     return frame
@@ -552,7 +705,9 @@ def _normalize_cache_date(value: str) -> str:
 
 
 def _sanitize_cache_segment(value: str) -> str:
-    cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in value.strip().lower())
+    cleaned = "".join(
+        ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in value.strip().lower()
+    )
     return cleaned or "unknown"
 
 
@@ -560,15 +715,48 @@ def _loader_cache_metadata_path(cache_path: Path) -> Path:
     return cache_path.with_suffix(cache_path.suffix + ".json")
 
 
-def _read_loader_cache_frame(cache_path: Path) -> pd.DataFrame | None:
+def _cache_file_identity(path: Path) -> list[int]:
+    stat = path.stat()
+    return [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns]
+
+
+def _read_loader_cache_frame(
+    cache_path: Path, source_revision: str | None = None
+) -> pd.DataFrame | None:
     if not cache_path.is_file():
         return None
 
     metadata_path = _loader_cache_metadata_path(cache_path)
     try:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        # Every cache frame, including one with an unnamed RangeIndex, writes
+        # explicit index metadata. Accepting {} or [] here silently turns a
+        # dated series into row numbers and drops its adjustment/currency.
+        if not isinstance(metadata, dict) or metadata.get("version") != _LOADER_CACHE_VERSION:
+            raise ValueError("missing or incompatible cache metadata version")
+        if source_revision is not None and metadata.get("source_revision") != source_revision:
+            return None
+        if source_revision is not None and metadata.get("cache_file_identity") != _cache_file_identity(cache_path):
+            return None
+        index_columns = metadata.get("index_columns")
+        index_names = metadata.get("index_names")
+        frame_attrs = metadata.get("frame_attrs")
+        if (
+            not isinstance(index_columns, list) or not index_columns
+            or not all(isinstance(column, str) for column in index_columns)
+            or len(set(index_columns)) != len(index_columns)
+            or not isinstance(index_names, list) or len(index_names) != len(index_columns)
+            or not isinstance(frame_attrs, dict)
+            or any(
+                name in frame_attrs and not isinstance(frame_attrs[name], str)
+                for name in _LOADER_FRAME_METADATA_ATTRS
+            )
+        ):
+            raise ValueError("invalid cache index or frame metadata")
     except Exception as exc:  # noqa: BLE001 - local cache miss is non-fatal
-        logger.warning("loader cache metadata read failed for %s: %s", cache_path.name, exc)
+        logger.warning(
+            "loader cache metadata read failed for %s: %s", cache_path.name, exc
+        )
         return None
 
     con = None
@@ -586,26 +774,43 @@ def _read_loader_cache_frame(cache_path: Path) -> pd.DataFrame | None:
         if con is not None:
             con.close()
 
-    index_columns = metadata.get("index_columns") or []
-    if index_columns:
-        missing = [column for column in index_columns if column not in frame.columns]
-        if missing:
-            logger.warning("loader cache %s missing index column(s): %s", cache_path.name, missing)
+    try:
+        if source_revision is not None and metadata.get("cache_file_identity") != _cache_file_identity(cache_path):
             return None
-        frame = frame.set_index(index_columns)
-        frame.index.names = metadata.get("index_names") or index_columns
-        frame = _restore_cache_index_dtypes(frame, metadata.get("index_dtypes"))
-    frame.columns.name = metadata.get("columns_name")
-    frame_attrs = metadata.get("frame_attrs")
-    if isinstance(frame_attrs, dict):
-        for name in _LOADER_FRAME_METADATA_ATTRS:
-            value = frame_attrs.get(name)
-            if isinstance(value, str):
-                frame.attrs[name] = value
+        index_columns = metadata.get("index_columns") or []
+        if index_columns:
+            missing = [
+                column for column in index_columns if column not in frame.columns
+            ]
+            if missing:
+                logger.warning(
+                    "loader cache %s missing index column(s): %s",
+                    cache_path.name,
+                    missing,
+                )
+                return None
+            frame = frame.set_index(index_columns)
+            frame.index.names = metadata.get("index_names") or index_columns
+            frame = _restore_cache_index_dtypes(frame, metadata.get("index_dtypes"))
+        frame.columns.name = metadata.get("columns_name")
+        frame_attrs = metadata.get("frame_attrs")
+        if isinstance(frame_attrs, dict):
+            for name in _LOADER_FRAME_METADATA_ATTRS:
+                value = frame_attrs.get(name)
+                if isinstance(value, str):
+                    frame.attrs[name] = value
+    except Exception as exc:  # noqa: BLE001 - corrupt metadata is a cache miss
+        logger.warning(
+            "loader cache metadata restore failed for %s: %s", cache_path.name, exc
+        )
+        return None
+
     return frame
 
 
-def _restore_cache_index_dtypes(frame: pd.DataFrame, index_dtypes: object) -> pd.DataFrame:
+def _restore_cache_index_dtypes(
+    frame: pd.DataFrame, index_dtypes: object
+) -> pd.DataFrame:
     """Best-effort restore of the per-level index dtypes recorded at write time.
 
     Cosmetic and non-fatal: duckdb parquet may rewrite datetime resolution, so
@@ -627,7 +832,9 @@ def _restore_cache_index_dtypes(frame: pd.DataFrame, index_dtypes: object) -> pd
     return frame
 
 
-def _write_loader_cache_frame(cache_path: Path, frame: pd.DataFrame) -> None:
+def _write_loader_cache_frame(
+    cache_path: Path, frame: pd.DataFrame, source_revision: str | None = None
+) -> None:
     metadata_path = _loader_cache_metadata_path(cache_path)
     # pid + uuid so two concurrent writers of the same key never share a tmp
     # path; os.replace then swaps each file in atomically.
@@ -638,23 +845,31 @@ def _write_loader_cache_frame(cache_path: Path, frame: pd.DataFrame) -> None:
     try:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_frame, metadata = _frame_for_loader_cache(frame)
+        if source_revision is not None:
+            metadata["source_revision"] = source_revision
 
         import duckdb
 
         con = duckdb.connect(database=":memory:")
         try:
             con.register("cache_frame", cache_frame)
-            con.execute(f"COPY cache_frame TO {_duckdb_sql_string(tmp_path)} (FORMAT PARQUET)")
+            con.execute(
+                f"COPY cache_frame TO {_duckdb_sql_string(tmp_path)} (FORMAT PARQUET)"
+            )
         finally:
             con.close()
 
+        if source_revision is not None:
+            metadata["cache_file_identity"] = _cache_file_identity(tmp_path)
         tmp_metadata_path.write_text(
             json.dumps(metadata, sort_keys=True, separators=(",", ":")),
             encoding="utf-8",
         )
         os.replace(tmp_path, cache_path)
         os.replace(tmp_metadata_path, metadata_path)
-    except Exception as exc:  # noqa: BLE001 - cache write failures should not fail fetches
+    except (
+        Exception
+    ) as exc:  # noqa: BLE001 - cache write failures should not fail fetches
         logger.warning("loader cache write failed for %s: %s", cache_path.name, exc)
         for path in (tmp_path, tmp_metadata_path):
             try:
@@ -665,7 +880,9 @@ def _write_loader_cache_frame(cache_path: Path, frame: pd.DataFrame) -> None:
                 pass
 
 
-def _frame_for_loader_cache(frame: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, object]]:
+def _frame_for_loader_cache(
+    frame: pd.DataFrame,
+) -> tuple[pd.DataFrame, dict[str, object]]:
     cache_frame = frame.copy()
     original_index_names = list(cache_frame.index.names)
     columns_name = cache_frame.columns.name

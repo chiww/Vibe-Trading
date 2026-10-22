@@ -150,7 +150,10 @@ def compute_risk_xray(
             "fewer than 2 shared trading days after aligning calendars across symbols"
         )
 
-    returns = aligned.pct_change(fill_method=None).dropna(how="any")
+    # Compute each one-bar return before dropping incomplete shared dates.
+    # Otherwise an interior missing close becomes a multi-bar move presented
+    # as one observation and distorts volatility and tail risk.
+    returns = frame[kept].pct_change(fill_method=None).dropna(how="any")
     if returns.empty:
         raise ValueError("no overlapping return observations across symbols")
 
@@ -192,8 +195,13 @@ def _concentration(w: np.ndarray) -> dict[str, Any]:
 
 def _volatility(port: pd.Series, ppy: int | None) -> dict[str, Any]:
     vol = float(port.std(ddof=1)) if len(port) > 1 else None
-    downside = port[port < 0]
-    downside_dev = float(downside.std(ddof=1)) if len(downside) > 1 else None
+    # Zero-target downside deviation: root mean square of the losses over every
+    # return period, matching ``calc_metrics`` Sortino. The sample standard
+    # deviation of the losing bars alone measures how much the losses differ
+    # from each other, so a book that loses 1% every losing bar reads as zero.
+    downside_dev = (
+        float(np.sqrt((port.clip(upper=0.0) ** 2).mean())) if len(port) > 0 else None
+    )
     annualize = _annualize_factor(ppy, port.index)
     return {
         "daily_vol": _finite(vol),

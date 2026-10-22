@@ -912,7 +912,7 @@ def test_render_shadow_report_emits_html(profitable_journal: Path, tmp_path: Pat
     assert profile.shadow_id in content
     assert "Delta Attribution" in content  # Section 5
     assert "Counterfactual" in content      # Section 6
-    assert out["engine"] in ("weasyprint", "html-only")
+    assert out["engine"] in ("weasyprint", "reportlab", "html-only")
 
 
 @pytest.mark.unit
@@ -1021,6 +1021,102 @@ def test_weasyprint_probe_is_cached_when_available(
         assert pdf_path is not None and pdf_path.exists()
 
     assert attempts == ["weasyprint"]
+
+
+@pytest.mark.unit
+def test_reportlab_fallback_renders_pdf_when_weasyprint_missing(
+    profitable_journal: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hosts without weasyprint's system libs still get a PDF via reportlab."""
+    from src.shadow_account import reporter
+
+    monkeypatch.setattr(reporter, "_WEASYPRINT_HTML", False)  # probe already failed
+    profile = extract_shadow_profile(profitable_journal)
+    result = _stub_backtest_result(profile)
+
+    out = reporter.render_shadow_report(profile, result, output_dir=tmp_path)
+
+    assert out["engine"] == "reportlab"
+    pdf_path = Path(out["pdf_path"])
+    assert pdf_path.exists()
+    assert pdf_path.read_bytes()[:5] == b"%PDF-"
+    assert pdf_path.stat().st_size > 2000
+
+
+@pytest.mark.unit
+def test_reportlab_fallback_escapes_cjk_and_markup_chars(
+    profitable_journal: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CJK text and XML-special chars in run data must not break platypus."""
+    from src.shadow_account import reporter
+
+    monkeypatch.setattr(reporter, "_WEASYPRINT_HTML", False)
+    profile = extract_shadow_profile(profitable_journal)
+    result = _stub_backtest_result(profile)
+    signals = [
+        {
+            "symbol": "600519.SH",
+            "market": "china_a",
+            "rule_id": "R1",
+            "reason": "匹配影子规则 <b> & 其他",
+        }
+    ]
+
+    out = reporter.render_shadow_report(
+        profile, result, today_signals=signals, output_dir=tmp_path,
+    )
+
+    assert out["engine"] == "reportlab"
+    assert Path(out["pdf_path"]).exists()
+
+
+@pytest.mark.unit
+def test_pdf_degrades_to_html_only_when_both_engines_fail(
+    profitable_journal: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HTML remains the last resort, and no partial PDF is left behind."""
+    from src.shadow_account import reporter
+
+    monkeypatch.setattr(reporter, "_WEASYPRINT_HTML", False)
+
+    def boom(**kwargs: object) -> None:
+        raise RuntimeError("no reportlab")
+
+    monkeypatch.setattr(reporter, "render_pdf_reportlab", boom)
+    profile = extract_shadow_profile(profitable_journal)
+    result = _stub_backtest_result(profile)
+
+    out = reporter.render_shadow_report(profile, result, output_dir=tmp_path)
+
+    assert out["engine"] == "html-only"
+    assert out["pdf_path"] is None
+    assert not (tmp_path / f"{profile.shadow_id}.pdf").exists()
+
+
+@pytest.mark.unit
+def test_reportlab_fallback_embeds_bundled_font_when_no_system_font(
+    profitable_journal: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fontless host embeds the bundled font on every render.
+
+    Both reports must use the registered embedded family; a successful parse
+    alone cannot prove that an unembedded CID font renders in a PDF reader.
+    """
+    from src.shadow_account import pdf_fallback, reporter
+
+    monkeypatch.setattr(reporter, "_WEASYPRINT_HTML", False)
+    monkeypatch.setattr(pdf_fallback, "system_cjk_candidates", lambda: [])
+    monkeypatch.setattr(pdf_fallback, "_font_ready", False)
+    profile = extract_shadow_profile(profitable_journal)
+    result = _stub_backtest_result(profile)
+
+    first = reporter.render_shadow_report(profile, result, output_dir=tmp_path / "a")
+    assert first["engine"] == "reportlab"
+    assert pdf_fallback._ensure_font() == "VibeShadowCJK"
+
+    second = reporter.render_shadow_report(profile, result, output_dir=tmp_path / "b")
+    assert second["engine"] == "reportlab"
+    assert Path(second["pdf_path"]).read_bytes()[:5] == b"%PDF-"
 
 
 # ---------------- M5/M6: Tool wrappers + scanner ----------------
@@ -1209,6 +1305,58 @@ def test_compute_rsi_is_causal_and_bounded() -> None:
     at_20_full = float(_compute_rsi(rising).iloc[20])
     at_20_trunc = float(_compute_rsi(rising.iloc[:21]).iloc[-1])
     assert at_20_full == pytest.approx(at_20_trunc)
+
+
+@pytest.mark.unit
+def test_compute_rsi_matches_wilder_recursive_smoothing() -> None:
+    """On a mixed gain/loss series, must match true Wilder recursive
+    smoothing: the first average is a simple mean of the first `period`
+    gains/losses (the seed), and every bar after that applies the recursive
+    update ``avg[t] = (avg[t-1] * (period - 1) + x[t]) / period``. Seeding
+    from the single first observation instead (pandas' ewm with
+    adjust=False, taken alone) diverges materially from this on the bars
+    right after warmup, even though the two converge much later."""
+    closes = [
+        100.0, 101.0, 99.5, 102.0, 101.0, 103.0, 100.0, 104.0, 101.5, 105.0,
+        102.0, 106.0, 103.0, 107.0, 104.5, 106.0, 108.0, 103.5, 107.0, 109.0,
+    ]
+    close = pd.Series(closes)
+
+    deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+    gains = [max(d, 0.0) for d in deltas]
+    losses = [max(-d, 0.0) for d in deltas]
+    period = 14
+
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    for g, loss_val in zip(gains[period:], losses[period:]):
+        avg_gain = (avg_gain * (period - 1) + g) / period
+        avg_loss = (avg_loss * (period - 1) + loss_val) / period
+    expected = 100 - 100 / (1 + avg_gain / avg_loss)
+
+    assert float(_compute_rsi(close, period=period).iloc[-1]) == pytest.approx(expected)
+
+
+@pytest.mark.unit
+def test_compute_rsi_seed_is_a_simple_average_not_first_value() -> None:
+    """At exactly `period` valid deltas (the boundary case), the seed value
+    itself is the whole answer: a simple mean of every gain/loss so far, not
+    the single-observation seed pandas' ewm(adjust=False) would use."""
+    closes = [
+        100.0, 101.0, 99.5, 102.0, 101.0, 103.0, 100.0, 104.0, 101.5, 105.0,
+        102.0, 106.0, 103.0, 107.0, 104.5,
+    ]
+    close = pd.Series(closes)
+
+    deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+    gains = [max(d, 0.0) for d in deltas]
+    losses = [max(-d, 0.0) for d in deltas]
+    period = 14
+    assert len(gains) == period
+
+    expected = 100 - 100 / (1 + (sum(gains) / period) / (sum(losses) / period))
+
+    assert float(_compute_rsi(close, period=period).iloc[-1]) == pytest.approx(expected)
 
 
 @pytest.mark.unit
@@ -1966,6 +2114,74 @@ def test_generated_engine_keeps_unmatched_markets_flat() -> None:
     assert signals["AAPL"].ne(0).any()
     for code in ("600519.SH", "0700.HK", "BTC-USDT"):
         assert signals[code].eq(0).all(), code
+
+
+@pytest.mark.unit
+def test_generated_engine_other_market_rule_is_not_a_wildcard() -> None:
+    """A rule whose own market is "other" must only fire for codes that
+    themselves resolve to "other" -- it must not shadow a more specific
+    rule for every other code."""
+    import importlib.util
+    import tempfile
+
+    rule_other = ShadowRule(
+        rule_id="R1",
+        human_text="low-support unresolved-market rule",
+        entry_condition={"market": "other", "entry_hour": {"min": 0, "max": 23}},
+        exit_condition={"holding_days": {"min": 2, "max": 5}},
+        holding_days_range=(3, 3),
+        support_count=5,
+        coverage_rate=0.1,
+        sample_trades=("XYZ@2026-01-10",),
+    )
+    rule_us = ShadowRule(
+        rule_id="R2",
+        human_text="high-support US rule",
+        entry_condition={"market": "us", "entry_hour": {"min": 0, "max": 23}},
+        exit_condition={"holding_days": {"min": 2, "max": 5}},
+        holding_days_range=(3, 3),
+        support_count=50,
+        coverage_rate=0.9,
+        sample_trades=("AAPL@2026-01-10",),
+    )
+    profile = ShadowProfile(
+        shadow_id="shadow_other_wildcard",
+        created_at="2026-01-01T00:00:00",
+        journal_hash="test",
+        source_market="us",
+        profitable_roundtrips=55,
+        total_roundtrips=60,
+        date_range=("2025-01-01", "2026-01-01"),
+        profile_text="test",
+        rules=(rule_other, rule_us),
+        preferred_markets=("us", "other"),
+        typical_holding_days=(3.0,),
+    )
+
+    source = render_signal_engine(profile)
+    ok, err = validate_generated(source)
+    assert ok, f"generated source failed validation: {err}"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "signal_engine.py"
+        path.write_text(source, encoding="utf-8")
+        spec = importlib.util.spec_from_file_location("gen_se_other_wildcard", path)
+        module = importlib.util.module_from_spec(spec)
+        assert spec and spec.loader
+        spec.loader.exec_module(module)
+        engine = module.SignalEngine()
+
+        picked = engine._pick_rule("AAPL")
+        assert picked is not None
+        assert picked["rule_id"] == "R2", (
+            "AAPL resolves to market 'us' and must pick the market-specific "
+            "rule R2, not fall through to R1 just because R1's market "
+            "literal happens to be 'other'"
+        )
+
+        picked_other = engine._pick_rule("123456")
+        assert picked_other is not None
+        assert picked_other["rule_id"] == "R1"
 
 
 @pytest.mark.unit

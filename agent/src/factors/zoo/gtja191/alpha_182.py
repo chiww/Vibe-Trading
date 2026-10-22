@@ -39,7 +39,7 @@ ALPHA_ID = "gtja191_182"
 __alpha_meta__ = {
     'id': 'gtja191_182',
     'theme': ['momentum'],
-    'formula_latex': 'see body',
+    'formula_latex': 'COUNT((CLOSE>OPEN & BENCH>DELAY(BENCH,1)) | (CLOSE<OPEN & BENCH<DELAY(BENCH,1)), 20) / 20',
     'columns_required': ['open', 'high', 'low', 'close', 'volume'],
     'extras_required': [],
     'universe': ['equity_cn'],
@@ -74,6 +74,7 @@ def compute(panel):
     bench = _bench_close()
     up = ((c > o) & (bench > bench.shift(1)))
     dn = ((c < o) & (bench < bench.shift(1)))
-    cond = (up | dn).astype("float64")
+    # A bar with a missing open/close is neither up nor down (#1463).
+    cond = (up | dn).astype("float64").where(c.notna() & o.notna())
     out = cond.rolling(20).sum() / 20.0
     return out

@@ -11,10 +11,18 @@ category: strategy
 3. **Strategy coding**: write `code/signal_engine.py` (following the `SignalEngine` contract)
 4. **Syntax check**: `bash("python -c \"import ast; ast.parse(open('code/signal_engine.py').read()); print('OK')\"")`
 5. **Run backtest**: call the `backtest` tool (built into the engine; no need to write `run_backtest.py`)
-6. **Evaluate results**: read `artifacts/metrics.csv` and judge by the review criteria
-7. **Iterative fixing**: if results are poor, modify with `edit_file` → run `backtest` → re-evaluate
+6. **Evaluate results**: use the backtest tool's structured metrics, validation and artifact summary. Read `artifacts/metrics.csv` or targeted rows with `read_run_artifact` only when the requested evidence is missing from that summary. Judge by the review criteria and report failures honestly.
+7. **Fix implementation errors**: repair code/contract errors and rerun to verify. Poor returns in a correctly implemented strategy are a valid result: report them and stop. Change the strategy or test additional candidates only when the user requested optimization or comparison, within their specified scope. Deeper attribution and robustness research are performed when requested, not added to every backtest.
 
 **You only need to write `signal_engine.py` and `config.json`. The `backtest` tool automatically handles data loading and backtest execution.**
+
+## Adapting a registered strategy
+
+1. Read `get_strategy_evidence(strategy_id="sdm:...")` for the parent's description and computed regime definitions. A stale, disabled, decayed or inadequately evidenced parent cannot be adapted.
+2. Call `adapt_strategy(strategy_id=..., name=..., universe=..., config=...)` with explicit codes and date window. Only name, universe and optional position sizing may change. Signal definition, entry and exit rules remain the parent's. Missing inputs require a question, never a fabricated metric or threshold.
+3. Use the returned assigned `run_dir` and seeded `config.json`. Generate the child's `code/signal_engine.py` from its description using the contract below; never copy a parent run's metrics. Preserve the bound codes, dates and `strategy_adaptation` metadata. Record model provenance through the normal write tool.
+4. Call `backtest(run_dir=...)`, inspect its artifacts, then `refresh_strategy_evidence(runs=[{"strategy_id": "sdm:<child>", "run_dir": "<assigned>"}], scope="strategies")`. This updates only successful named strategies and preserves the parent's evidence. Refresh refuses a different run or changed config/code/results against the run card.
+5. Read the child's evidence and report its actual quality, cost and decay warnings. A successful backtest is not adequate regime evidence or independent approval. An unchanged mathematical signal can legitimately generate identical code for another universe; hashes establish provenance, not semantic correctness of generated Python.
 
 ## Requirements Parsing
 
@@ -138,7 +146,7 @@ Self-check after writing `signal_engine.py`:
 - `source`: `"auto"` (recommended, auto-select by code format) / `"tushare"` / `"yfinance"` / `"okx"` / `"akshare"` / `"ccxt"`
   - `"auto"` supports mixed instruments. For example, `["000001.SZ", "BTC-USDT"]` will be automatically routed to `tushare` and `okx`
   - Futures codes (e.g. `"IF2406.CFFEX"`, `"ESZ4"`) and forex pairs (e.g. `"EUR/USD"`) are also auto-routed
-- `interval`: candlestick interval, default `"1D"`. Supported values: `"1m"` / `"5m"` / `"15m"` / `"30m"` / `"1H"` / `"4H"` / `"1D"`
+- `interval`: candlestick interval, default `"1D"`. Supported values: `"1m"` / `"5m"` / `"15m"` / `"30m"` / `"1H"` / `"4H"` / `"1D"` / `"1W"` / `"1M"` (weekly and monthly bars are built from daily ones; `"1M"` is a month, `"1m"` a minute)
   - The annualization factor for minute backtests is inferred automatically from `source` (252 trading days for China A-shares, 365 calendar days for crypto)
   - Minute backtests can be very data-heavy. Recommended limits are no more than 30 days for `1m`, or 1 year for `1H`
 - `warmup_bars`: how many leading bars exist only to prime the indicators. They are loaded and fed to `SignalEngine.generate()`, then excluded from trades, the equity curve, the benchmark and every metric. Default `0` grades the whole loaded window.
@@ -156,8 +164,10 @@ Self-check after writing `signal_engine.py`:
   - Rule of thumb: `"rebalance"` when the target weight itself carries the strategy (optimizers, risk budgets, continuous scaling); `"hold"` when entries and exits carry it and the weight in between is incidental.
 - `rebalance_mask`: optional execution schedule used only under `"rebalance"`. Use a pandas offset alias such as `"MS"`, `"W-FRI"`, or `"QS"`, or an explicit ISO-date list such as `["2026-01-02", "2026-02-02"]`. Each period/date selects the first aligned trading bar on or after it; ordinary bars HOLD even when the dense target is zero. An alias must not be finer than the aligned bar interval; `W-FRI` starts a Friday-anchored period and normally executes on the following Monday. Omit it to preserve every-bar execution. Do not combine it with `"hold"`.
 - `rebalance_tolerance`: drift band around the target, as a fraction of it, used only under `"rebalance"`. A resize executes once the held weight has moved further than this from its target; a **changed** target breaches any sane band on its own, so target changes always execute. Default `0.0` means no band, and then the resize test is decided by the slippage width alone — measured on a constant 20% target over 60 bars, `0.0` produced 60 fills, `0.02` produced 12, and `0.05` produced 5 while the weight never left 0.21. Use `rebalance_mask`, not tolerance, to express a strategy's execution cadence. `0.05` is a reasonable starting point, not a recommendation with evidence behind it — it is your modelling choice and the report records the value the run used.
+- `artifact_id`: optional. Set it only when the run benches an artifact registered with `sdm_register`; the backtest then records its metrics in that artifact's bench history. `bench_type` (`"initial"` / `"periodic"` / `"manual"`, default `"manual"`) states whether the run counts towards decay monitoring, which reads only `initial` and `periodic` runs. Omit both for exploratory runs.
 - `initial_cash`: default 1,000,000
 - `commission`: default 0.1%
+- `hk_lot_sizes`: optional, Hong Kong only — `{"00700.HK": 100, "02800.HK": 500}`. HK board lots are set per issuer, so without this table every HK order is rounded to 100 shares and a name whose real lot is smaller than its target trades zero times. Codes match with or without leading zeros. Every symbol with no configured lot size uses 100 shares and is listed under `lot_assumptions` in the metrics, including runs without a table. Reports must identify these as assumptions rather than verified exchange lots.
 - `validation`: optional statistical validation after backtest completes. Omit to skip. Example:
   ```json
   "validation": {

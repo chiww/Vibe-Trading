@@ -6,6 +6,8 @@ touch the network or require a real token.
 
 from __future__ import annotations
 
+import pytest
+
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -37,7 +39,8 @@ def test_fund_flow_maps_moneyflow_buckets_to_existing_schema() -> None:
     row = result["rows"][0]
     assert result["source"] == "tushare"
     assert row["timestamp"] == "2024-01-03"
-    assert row["main"] == 125000.0
+    assert row["main"] == 330000.0
+    assert row["net_total"] == 125000.0
     assert row["small"] == 20000.0
     assert row["medium"] == -30000.0
     assert row["large"] == 130000.0
@@ -73,11 +76,14 @@ def test_dragon_tiger_maps_top_list_and_top_inst() -> None:
     assert data["seats"][0]["net"] == 2.0e8
 
 
-def test_northbound_converts_tushare_million_yuan_to_10k_cny() -> None:
+def test_northbound_passes_through_million_yuan_with_semantics_note() -> None:
+    """No ×100 rescale: post-2024-08-19 rows are turnover in million CNY
+    (HKEX-verified, issue #1481); a constant factor cannot serve both eras,
+    so values pass through and the note documents the boundary."""
     pro = SimpleNamespace(
         moneyflow_hsgt=lambda **_: [
-            {"trade_date": "20240102", "hgt": 12.0, "sgt": -2.0, "north_money": 10.0},
-            {"trade_date": "20240103", "hgt": 3.5, "sgt": 1.0, "north_money": 4.5},
+            {"trade_date": "20240816", "hgt": -2568.22, "sgt": 100.0, "north_money": -2468.22},
+            {"trade_date": "20240819", "hgt": 46129.34, "sgt": 50000.0, "north_money": 96129.34},
         ]
     )
     with patch.object(tf, "_pro_api", return_value=pro), patch.object(
@@ -85,10 +91,18 @@ def test_northbound_converts_tushare_million_yuan_to_10k_cny() -> None:
     ):
         data = tf.fetch_northbound_flow(lookback_days=2)
 
-    assert data["unit"] == "10k CNY"
-    assert data["history"][0]["shanghai_connect"] == 1200.0
-    assert data["history"][0]["total"] == 1000.0
-    assert data["realtime"]["total"] == 450.0
+    assert data["unit"] == "CNY million"
+    assert data["history"][0]["shanghai_connect"] == -2568.22
+    assert data["history"][0]["total"] == -2468.22
+    assert data["history"][0]["turnover_total"] is None
+    assert data["history"][1]["shanghai_connect"] is None
+    assert data["history"][1]["total"] is None
+    assert data["history"][1]["turnover_shanghai"] == 46129.34
+    assert data["history"][1]["turnover_total"] == 96129.34
+    assert data["realtime"]["total"] is None
+    assert data["realtime"]["turnover_total"] == 96129.34
+    assert "2024-08-19" in data["note"]
+    assert "turnover" in data["note"].lower()
 
 
 def test_margin_trading_maps_and_sorts_most_recent_first() -> None:
@@ -107,3 +121,43 @@ def test_margin_trading_maps_and_sorts_most_recent_first() -> None:
     assert data["rows"][0]["trade_date"] == "2024-01-03"
     assert data["rows"][0]["financing_balance"] == 7.0
     assert data["rows"][1]["margin_total_balance"] == 6.0
+
+
+def test_ts_code_routes_beijing_920_codes_to_bj() -> None:
+    assert tf._ts_code("920002") == "920002.BJ"
+    assert tf._ts_code("830799") == "830799.BJ"
+    assert tf._ts_code("430047") == "430047.BJ"
+    assert tf._ts_code("900901") == "900901.SH"
+    assert tf._ts_code("600519") == "600519.SH"
+    assert tf._ts_code("000001") == "000001.SZ"
+
+
+@pytest.mark.parametrize("missing", [None, "-", float("nan"), float("inf")])
+def test_fund_flow_missing_side_is_not_zero_or_total_flow(missing):
+    pro = SimpleNamespace(moneyflow=lambda **_: [{
+        "trade_date": "20240103", "net_mf_amount": 999,
+        "buy_lg_amount": missing, "sell_lg_amount": 7,
+        "buy_elg_amount": 30, "sell_elg_amount": 10,
+    }])
+    with patch.object(tf, "_pro_api", return_value=pro):
+        row = tf.fetch_fund_flow("600519.SH", days=5)["rows"][0]
+    assert row["large"] is None
+    assert row["main"] is None
+    assert row["small"] is None
+    assert row["super_large"] == 200000
+
+
+def test_empty_tushare_fund_flow_is_unavailable():
+    with patch.object(tf, "_pro_api", return_value=SimpleNamespace(moneyflow=lambda **_: [])):
+        with pytest.raises(tf.TushareFallbackUnavailable, match="no.*rows"):
+            tf.fetch_fund_flow("600519.SH", days=5)
+
+
+def test_real_zero_buckets_stay_zero_and_absent_total_stays_unknown():
+    data = {"trade_date": "20240103"}
+    for size in ("sm", "md", "lg", "elg"):
+        data[f"buy_{size}_amount"] = data[f"sell_{size}_amount"] = 0
+    with patch.object(tf, "_pro_api", return_value=SimpleNamespace(moneyflow=lambda **_: [data])):
+        row = tf.fetch_fund_flow("600519.SH", days=5)["rows"][0]
+    assert all(row[key] == 0 for key in ("main", "small", "medium", "large", "super_large"))
+    assert row["net_total"] is None

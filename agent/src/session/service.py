@@ -232,6 +232,11 @@ class SessionService:
         """Return a session by ID."""
         return self.store.get_session(session_id)
 
+    def update_session(self, session: Session) -> None:
+        """Persist session metadata and refresh its search label."""
+        self.store.update_session(session)
+        self._search_index.index_session(session.session_id, session.title)
+
     def list_sessions(self, limit: int = 50) -> list[Session]:
         """List all sessions."""
         return self.store.list_sessions(limit)
@@ -404,12 +409,21 @@ class SessionService:
                 content=self._format_result_message(attempt),
                 linked_attempt_id=attempt.attempt_id,
                 metadata=reply_metadata,
-                tool_trail=(
-                    result.get("tool_trail", [])
-                    if attempt.status == AttemptStatus.COMPLETED
-                    else []
-                ),
+                # Every terminal attempt keeps its steps. A failed run saved an
+                # empty trail, so after a reload the history said "0 steps"
+                # for a run that made eight rounds of tool calls — hiding the
+                # one thing a failure report needs.
+                tool_trail=result.get("tool_trail", []),
             )
+            reports = [entry["artifact"] for entry in reply.tool_trail
+                       if entry.get("status") == "ok" and isinstance(entry.get("artifact"), dict)]
+            if reports:
+                reply.metadata["generated_reports"] = reports
+                # Persist and stream the same concrete download links even if
+                # the model forgot to include them in its final answer.
+                links = [f"[{str(report['filename']).replace('[', '').replace(']', '')}]({report['download_url']})"
+                         for report in reports]
+                reply.content += "\n\n" + "\n\n".join(dict.fromkeys(links))
             self.store.append_message(reply)
             # The append-only transcript is the user-visible source of truth.
             # Commit it before attempt.json so startup recovery can finish a
@@ -421,7 +435,7 @@ class SessionService:
                 session.session_id,
                 _TERMINAL_EVENTS.get(attempt.status.value, "attempt.failed"),
                 {"attempt_id": attempt.attempt_id, "status": attempt.status.value,
-                 "summary": attempt.summary, "error": attempt.error, "run_dir": attempt.run_dir,
+                 "summary": reply.content, "error": attempt.error, "run_dir": attempt.run_dir,
                  "started_at": wall_started_at, "ended_at": time.time(),
                  **{key: reply_metadata[key] for key in ("elapsed_ms", *runtime_keys) if key in reply_metadata}},
             )
@@ -531,11 +545,13 @@ class SessionService:
             ),
         )
 
+        from src.config.accessor import get_env_config
+
         agent = AgentLoop(
             registry=registry,
             llm=llm,
             event_callback=event_callback,
-            max_iterations=50,
+            max_iterations=get_env_config().agent_tuning.vibe_trading_agent_max_iterations,
             persistent_memory=pm,
         )
         self._active_loops[session_id] = agent
@@ -643,6 +659,8 @@ class SessionService:
         if isinstance(elapsed_ms, (int, float)) and not isinstance(elapsed_ms, bool):
             match["elapsed_ms"] = max(0, int(elapsed_ms))
         match["preview"] = str(data.get("preview") or "")
+        if match["status"] == "ok" and isinstance(data.get("artifact"), dict):
+            match["artifact"] = dict(data["artifact"])
         if call_id:
             match["call_id"] = call_id
 
@@ -700,7 +718,13 @@ class SessionService:
 
     @staticmethod
     def _load_metrics(run_dir: Path) -> Optional[Dict[str, Any]]:
-        """Load metrics.csv from a run directory."""
+        """Load metrics.csv from a run directory.
+
+        A run's metrics row can carry a non-numeric column (e.g.
+        ``benchmark_ticker``) alongside the numeric metrics, so each field is
+        converted independently: one unconvertible field is skipped rather
+        than discarding every metric in the row.
+        """
         import csv
         metrics_path = run_dir / "artifacts" / "metrics.csv"
         if not metrics_path.exists():
@@ -708,11 +732,19 @@ class SessionService:
         try:
             with open(metrics_path, "r", encoding="utf-8") as f:
                 rows = list(csv.DictReader(f))
-                if rows:
-                    return {k: float(v) for k, v in rows[0].items() if v}
         except Exception:
-            pass
-        return None
+            return None
+        if not rows:
+            return None
+        metrics: Dict[str, Any] = {}
+        for key, value in rows[0].items():
+            if not value:
+                continue
+            try:
+                metrics[key] = float(value)
+            except (TypeError, ValueError):
+                continue
+        return metrics or None
 
     @staticmethod
     def _format_result_message(attempt: Attempt) -> str:

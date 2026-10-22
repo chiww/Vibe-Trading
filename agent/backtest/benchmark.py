@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 import pandas as pd
 
+from backtest.loaders.base import resample_bars, source_interval
 from backtest.loaders.registry import is_no_network_fallback_source
 from backtest.loaders.yfinance_loader import DataLoader as YfinanceLoader
 from backtest.metrics import bar_returns, buy_and_hold_return
@@ -24,6 +25,7 @@ MARKET_BENCHMARKS: dict[str, Optional[str]] = {
     "us_equity":  "SPY",
     "hk_equity":  "HK.03100",   # Hang Seng China Enterprises ETF
     "ca_equity":  "XIC.TO",     # S&P/TSX Capped Composite ETF
+    "br_equity":  "BOVA11.SA",  # iShares Ibovespa ETF
     "a_share":    "000300.SH",  # CSI 300 (China A-share core index)
     "crypto":     "BTC-USDT",
     "futures":    "ES.CME",      # E-mini S&P 500 futures
@@ -80,12 +82,12 @@ def resolve_benchmark(
         source:         Data source name (tushare / yfinance / okx / akshare / ccxt).
         start_date:     Backtest start date.
         end_date:       Backtest end date.
-        interval:       Bar interval (1m / 5m / 15m / 30m / 1H / 4H / 1D).
+        interval:       Bar interval (1m / 5m / 15m / 30m / 1H / 4H / 1D / 1W / 1M).
         explicit:       Override ticker (e.g. "SPY" passed via config).
         loader:         Loader of the configured data source. When given, the
                         benchmark is fetched through it first, falling back to
-                        yfinance if it yields no data — except ``local``,
-                        which fails closed to keep offline runs offline.
+                        yfinance if it yields no data, except sources whose
+                        contract prohibits a fallback to a different source.
 
     Returns:
         BenchmarkResult with return series and total return, or None if no
@@ -95,23 +97,18 @@ def resolve_benchmark(
     if ticker is None:
         return None
 
-    # "Offline" is not a property of ``local`` alone: every source the registry
-    # marks as no-network-fallback was named explicitly *because* the caller
-    # wants that source's provenance, and quietly fetching the benchmark from
-    # Yahoo reintroduces the network on the one number every return is graded
-    # against. Ask the registry rather than hard-coding one source name.
-    offline = is_no_network_fallback_source(source)
-    if offline and getattr(loader, "name", None) != source:
-        # The runtime fallback chain in fetch_data_map() may have swapped in a
-        # network loader while config["source"] still says local — never fetch
-        # the benchmark through it. Fail closed instead.
+    source_bound = is_no_network_fallback_source(source)
+    if source_bound and getattr(loader, "name", None) != source:
+        # Do not let a swapped loader bypass the configured source's boundary:
+        # local must stay offline, and source-specific quote currencies and
+        # explicit provider choices must not silently change for a benchmark.
         loader = None
 
     try:
         bench_df = _fetch_benchmark(
             ticker, start_date, end_date, interval,
             loader=loader,
-            allow_fallback=not offline,
+            allow_fallback=not source_bound,
         )
     except Exception:
         return None
@@ -170,6 +167,9 @@ def _infer_market(codes: list[str], source: str) -> str:
 
     first = codes[0].upper()
 
+    # Yahoo uses .SS for Shanghai; other loaders use the repository's .SH form.
+    if first.endswith((".SH", ".SS", ".SZ", ".BJ")):
+        return "a_share"
     if first.endswith(".US"):
         return "us_equity"
     if first.endswith(".HK"):
@@ -178,6 +178,8 @@ def _infer_market(codes: list[str], source: str) -> str:
         return "ca_equity"
     if first.endswith((".NS", ".BO")):
         return "india_equity"
+    if first.endswith(".SA"):
+        return "br_equity"
     if first.endswith((".KS", ".KQ")):
         return "kr_equity"
     crypto_quotes = ("-USDT", "-USDC", "-USD", "-BTC", "-ETH")
@@ -209,24 +211,26 @@ def _fetch_benchmark(
     Tries the configured source's loader first (when given). Falls back to
     yfinance (single symbol, no auth) when no loader is given or it yields
     no data — unless ``allow_fallback`` is False (offline sources fail
-    closed instead of making a network request).
+    closed instead of making a network request). Weekly and monthly bars are
+    built from daily ones the way the strategy's are (#1479).
     """
+    fetch_as = source_interval(interval)
     if loader is not None:
         try:
             df = _extract_frame(
-                loader.fetch([ticker], start_date, end_date, interval=interval),
+                loader.fetch([ticker], start_date, end_date, interval=fetch_as),
                 ticker,
             )
         except Exception:
             df = pd.DataFrame()
         if not df.empty:
-            return df
+            return resample_bars(df, interval)
 
     if not allow_fallback:
         return pd.DataFrame()
 
-    result = YfinanceLoader().fetch([ticker], start_date, end_date, interval=interval)
-    return _extract_frame(result, ticker)
+    result = YfinanceLoader().fetch([ticker], start_date, end_date, interval=fetch_as)
+    return resample_bars(_extract_frame(result, ticker), interval)
 
 
 def _extract_frame(result: Any, ticker: str) -> pd.DataFrame:

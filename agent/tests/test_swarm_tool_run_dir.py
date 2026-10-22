@@ -131,7 +131,7 @@ class _ScriptedLLM:
             ),
         ]
 
-    def stream_chat(self, messages, tools=None, timeout=None, on_text_chunk=None):
+    def stream_chat(self, messages, tools=None, timeout=None, on_text_chunk=None, on_waiting_chunk=None):
         return self._responses.pop(0)
 
     def close(self) -> None:
@@ -178,7 +178,7 @@ def test_worker_passes_a_relative_run_dir_through_to_the_tool(
     _run_worker_with(tmp_path, monkeypatch, _DeclaredTool(), {"run_dir": "runs/demo"})
 
     assert _DeclaredTool.received == [
-        str(tmp_path / "artifacts" / "analyst" / "runs" / "demo")
+        str(tmp_path / "artifacts" / "analyst" / "task" / "runs" / "demo")
     ]
 
 

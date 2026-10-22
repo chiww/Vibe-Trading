@@ -4,13 +4,16 @@ import { useTranslation } from "react-i18next";
 import { useParams, useNavigate, useSearchParams } from "react-router";
 import {
   AlertTriangle,
+  ArrowDown,
   ArrowLeft,
   ArrowLeftRight,
+  ArrowUp,
   BarChart3,
   Braces,
   CalendarRange,
   CheckCircle2,
   Code2,
+  Coins,
   Copy,
   Database,
   Download,
@@ -50,13 +53,15 @@ import { ErrorBoundary } from "@/components/common/ErrorBoundary";
 import { getStrategyReportIdentity, StrategyResearchDashboard } from "@/components/charts/StrategyResearchDashboard";
 import { FactorResearchPanel } from "@/components/charts/FactorResearchPanel";
 import { AttributionTab } from "@/components/charts/AttributionTab";
+import { LlmUsagePanel } from "@/components/run/LlmUsagePanel";
 import { PositionsTab } from "@/components/run/PositionsTab";
-import { RunCardPanel, RunCardStat, formatRunCardValue } from "@/components/run/RunCard";
+import { KeyValueTable, RunCardPanel, RunCardStat, formatRunCardValue } from "@/components/run/RunCard";
 import { isDateColumn } from "@/lib/positions";
+import { runTrades } from "@/lib/runReports";
 
 const rehypePlugins = [rehypeHighlight];
 
-type Tab = "dashboard" | "chart" | "tearsheet" | "trades" | "positions" | "attribution" | "runCard" | "code" | "validation" | "studio" | "factor";
+type Tab = "dashboard" | "chart" | "tearsheet" | "trades" | "positions" | "attribution" | "runCard" | "llmUsage" | "code" | "validation" | "studio" | "factor";
 type ChartPayload = Pick<RunData, "price_series" | "indicator_series" | "trade_markers">;
 type ChartCache = Record<string, ChartPayload>;
 type ChartLoadProgress = { done: number; total: number };
@@ -150,6 +155,7 @@ export function RunDetail() {
   const hasPositions = !!run?.artifacts_positions_csv?.some(
     (row) => Object.keys(row).some((key) => !isDateColumn(key)),
   );
+  const hasLlmUsage = !!run?.llm_usage?.totals;
   const TABS: { id: Tab; label: string; icon: typeof BarChart3; hidden?: boolean }[] = [
     { id: "dashboard", label: i18n.t("runDetail.dashboard"), icon: LayoutDashboard },
     { id: "chart", label: i18n.t("runDetail.chart"), icon: BarChart3 },
@@ -161,6 +167,7 @@ export function RunDetail() {
     { id: "studio", label: i18n.t("runDetail.studio"), icon: Gauge, hidden: !hasStudio },
     { id: "validation", label: i18n.t("runDetail.validation"), icon: ShieldCheck, hidden: !hasValidation },
     { id: "runCard", label: i18n.t("runDetail.runCard"), icon: FileCheck2, hidden: !hasRunCard },
+    { id: "llmUsage", label: i18n.t("runDetail.llmUsage.tab"), icon: Coins, hidden: !hasLlmUsage },
     { id: "code", label: i18n.t("runDetail.code"), icon: Code2 },
   ];
 
@@ -241,6 +248,7 @@ export function RunDetail() {
   const ok = run.status === "success";
   const cancelled = run.status === "cancelled";
   const reportIdentity = getStrategyReportIdentity(run);
+  const allTrades = runTrades(run);
 
   async function loadChartSymbol(
     symbol: string,
@@ -406,9 +414,9 @@ export function RunDetail() {
           </div>
 
           <div className="ml-auto flex flex-wrap gap-1">
-            {run.trade_log && run.trade_log.length > 0 && (
+            {allTrades.length > 0 && (
               <button
-                onClick={() => downloadCsv(`trades_${runId}.csv`, buildTradesCsv(run.trade_log!))}
+                onClick={() => downloadCsv(`trades_${runId}.csv`, buildTradesCsv(allTrades))}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs text-muted-foreground hover:bg-muted/60 transition-colors"
                 title={i18n.t("runDetail.downloadTradesCsv")}
               >
@@ -458,6 +466,7 @@ export function RunDetail() {
             <StudioTab xray={run.risk_xray} notes={run.rebalance_notes} />
           )}
           {tab === "runCard" && run.run_card && <RunCardTab card={run.run_card} />}
+          {tab === "llmUsage" && run.llm_usage && <LlmUsagePanel usage={run.llm_usage} />}
           {tab === "code" && <CodeTab code={code} />}
         </ErrorBoundary>
       </div>
@@ -466,6 +475,7 @@ export function RunDetail() {
 }
 
 function RunCardTab({ card }: { card: RunCard }) {
+  const { t } = useTranslation();
   const backtest = card.backtest || {};
   const reproducibility = card.reproducibility || {};
   const metrics = card.metrics || {};
@@ -529,6 +539,49 @@ function RunCardTab({ card }: { card: RunCard }) {
 
       <RunCardPanel title={i18n.t("runDetail.structuredMetrics")} icon={Braces}>
         <KeyValueTable data={structuredMetrics} empty={i18n.t("runDetail.noStructuredMetrics")} monospaceValues />
+      </RunCardPanel>
+
+      <RunCardPanel title={t("runDetail.trust.executionRecords")} icon={List}>
+        <p className="mb-3 text-xs text-muted-foreground">{t("runDetail.trust.executionDescription")}</p>
+        {card.tool_traces?.length ? (
+          <ol className="space-y-3">
+            {card.tool_traces.map((trace, index) => (
+              <li key={`${index}-${trace.started_at}`} className="rounded-lg border border-border/60 p-3">
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-sm font-medium">{t(`runDetail.trust.tools.${trace.tool}`)}</span>
+                  <span className={cn("rounded-md px-2 py-1 text-xs", trace.status === "ok" ? "bg-success/10 text-success" : trace.status === "error" ? "bg-danger/10 text-danger" : "bg-muted text-muted-foreground")}>
+                    {t(`runDetail.trust.status.${trace.status}`)}
+                  </span>
+                </div>
+                <dl className="grid gap-3 text-xs sm:grid-cols-2">
+                  <div><dt className="text-muted-foreground">{t("runDetail.trust.startedAt")}</dt><dd className="mt-1 break-all"><time dateTime={trace.started_at}>{trace.started_at || t("runDetail.noneRecorded")}</time></dd></div>
+                  <div><dt className="text-muted-foreground">{t("runDetail.trust.endedAt")}</dt><dd className="mt-1 break-all"><time dateTime={trace.ended_at}>{trace.ended_at || t("runDetail.noneRecorded")}</time></dd></div>
+                  <div><dt className="text-muted-foreground">{t("runDetail.trust.argsHash")}</dt><dd className="mt-1 break-all font-mono" dir="ltr">{trace.args_hash || t("runDetail.noneRecorded")}</dd></div>
+                  <div><dt className="text-muted-foreground">{t("runDetail.trust.resultHash")}</dt><dd className="mt-1 break-all font-mono" dir="ltr">{trace.result_hash || t("runDetail.noneRecorded")}</dd></div>
+                </dl>
+              </li>
+            ))}
+          </ol>
+        ) : <p className="text-sm text-muted-foreground">{t("runDetail.trust.noExecutionRecords")}</p>}
+      </RunCardPanel>
+
+      <RunCardPanel title={t("runDetail.trust.metricEvidence")} icon={FileCheck2}>
+        <p className="mb-3 text-xs text-muted-foreground">{t("runDetail.trust.evidenceDescription")}</p>
+        {card.citations?.length ? (
+          <ul className="space-y-3">
+            {card.citations.map((citation, index) => (
+              <li key={`${index}-${citation.metric}`} className="rounded-lg border border-border/60 p-3">
+                <dl className="grid gap-3 text-xs sm:grid-cols-2">
+                  <div><dt className="text-muted-foreground">{t("runDetail.trust.metric")}</dt><dd className="mt-1 break-all font-mono">{citation.metric}</dd></div>
+                  <div><dt className="text-muted-foreground">{t("runDetail.trust.artifact")}</dt><dd className="mt-1 break-all font-mono" dir="ltr">{citation.artifact_id}</dd></div>
+                  <div><dt className="text-muted-foreground">{t("runDetail.trust.column")}</dt><dd className="mt-1 break-all font-mono">{citation.column}</dd></div>
+                  <div><dt className="text-muted-foreground">{t("runDetail.trust.row")}</dt><dd className="mt-1 font-mono">{citation.row}</dd></div>
+                  <div className="sm:col-span-2"><dt className="text-muted-foreground">{t("runDetail.trust.artifactHash")}</dt><dd className="mt-1 break-all font-mono" dir="ltr">{citation.sha256 || t("runDetail.noneRecorded")}</dd></div>
+                </dl>
+              </li>
+            ))}
+          </ul>
+        ) : <p className="text-sm text-muted-foreground">{t("runDetail.trust.noMetricEvidence")}</p>}
       </RunCardPanel>
 
       <RunCardPanel title={i18n.t("runDetail.artifactChecksums")} icon={FileCheck2}>
@@ -752,27 +805,6 @@ function FactorTab({ runId }: { runId: string }) {
   );
 }
 
-function KeyValueTable({ data, empty, monospaceValues = false }: { data: Record<string, unknown>; empty: string; monospaceValues?: boolean }) {
-  const entries = Object.entries(data).filter(([, value]) => value !== undefined && value !== null && value !== "");
-  if (entries.length === 0) {
-    return <p className="text-sm text-muted-foreground">{empty}</p>;
-  }
-  return (
-    <div className="overflow-x-auto">
-      <table className="w-full table-fixed text-sm">
-        <tbody>
-          {entries.map(([key, value]) => (
-            <tr key={key} className="border-b last:border-0 hover:bg-muted/40">
-              <td className="w-36 break-all py-2 ps-4 pr-4 align-top text-muted-foreground">{key}</td>
-              <td className={cn("py-2 align-top", monospaceValues ? "break-all font-mono text-xs" : "break-words text-right tabular-nums")}>{formatRunCardValue(value)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
 function hasStructuredValidation(value: unknown): boolean {
   if (!value || typeof value !== "object") return false;
   const v = value as Record<string, unknown>;
@@ -934,6 +966,16 @@ function ChartTab({
 
 const TRADES_PAGE_SIZE = 100;
 
+function tradeTime(tr: Record<string, string>): string {
+  return tr.time || tr.timestamp || "";
+}
+
+// The engine writes ISO-shaped times ("YYYY-MM-DD[ HH:MM:SS]"), which order
+// correctly as strings; Date.parse would return NaN for the spaced form on Safari.
+function compareTradeTime(a: Record<string, string>, b: Record<string, string>): number {
+  return tradeTime(a).localeCompare(tradeTime(b));
+}
+
 function normalizeSide(value?: string): "BUY" | "SELL" | "" {
   const side = (value || "").trim().toUpperCase();
   if (side.startsWith("B")) return "BUY";
@@ -957,13 +999,20 @@ function formatSigned(value: number, suffix = ""): string {
 }
 
 function TradesTab({ run }: { run: RunData }) {
-  const trades = run.trade_log || [];
   const [sideFilter, setSideFilter] = useState<"" | "BUY" | "SELL">("");
   const [symbolFilter, setSymbolFilter] = useState("");
   const [visibleCount, setVisibleCount] = useState(TRADES_PAGE_SIZE);
+  const [sortDesc, setSortDesc] = useState(true);
+  const source = runTrades(run);
+  // Stable sorting preserves engine order for fills sharing a timestamp.
+  const trades = useMemo(() => [...source].sort(
+    (a, b) => sortDesc ? compareTradeTime(b, a) : compareTradeTime(a, b),
+  ), [source, sortDesc]);
   if (trades.length === 0) return <div className="p-8 text-muted-foreground text-sm">{i18n.t("runDetail.noTrades")}</div>;
 
-  const symbols = [...new Set(trades.map((tr) => tr.code).filter(Boolean))];
+  // Same code order as the Chart tab's symbol list, so a symbol sits in the
+  // same place on both tabs and does not move when the time order flips.
+  const symbols = [...new Set(trades.map((tr) => tr.code).filter(Boolean))].sort();
   const hasPnl = trades.some((tr) => parseTradeNumber(tr.pnl) != null);
   const hasReturnPct = trades.some((tr) => parseTradeNumber(tr.return_pct) != null);
   const hasHoldingDays = trades.some((tr) => (tr.holding_days ?? "") !== "");
@@ -1037,7 +1086,18 @@ function TradesTab({ run }: { run: RunData }) {
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b bg-muted/40 text-left text-[11px] uppercase tracking-wide text-muted-foreground [&_th]:font-medium">
-              <th className="py-2 ps-4 pr-4">{i18n.t("runDetail.time")}</th>
+              <th className="py-2 ps-4 pr-4" aria-sort={sortDesc ? "descending" : "ascending"}>
+                <button
+                  type="button"
+                  onClick={() => { setSortDesc((desc) => !desc); setVisibleCount(TRADES_PAGE_SIZE); }}
+                  className="inline-flex items-center gap-1 uppercase hover:text-foreground"
+                >
+                  {i18n.t("runDetail.time")}
+                  {sortDesc
+                    ? <ArrowDown className="h-3 w-3" aria-hidden="true" />
+                    : <ArrowUp className="h-3 w-3" aria-hidden="true" />}
+                </button>
+              </th>
               <th className="py-2 pr-4">{i18n.t("runDetail.code2")}</th>
               <th className="py-2 pr-4">{i18n.t("runDetail.side")}</th>
               <th className="py-2 pr-4 text-right">{i18n.t("runDetail.price")}</th>
@@ -1055,7 +1115,7 @@ function TradesTab({ run }: { run: RunData }) {
               const returnPct = parseTradeNumber(tr.return_pct);
               return (
                 <tr key={i} className={cn("border-b last:border-0 hover:bg-muted/40", i % 2 === 1 && "bg-muted/10")}>
-                  <td className="py-2 ps-4 pr-4 font-mono text-xs">{tr.time || tr.timestamp}</td>
+                  <td className="py-2 ps-4 pr-4 font-mono text-xs">{tradeTime(tr)}</td>
                   <td className="py-2 pr-4 font-mono text-xs">{tr.code}</td>
                   <td className="py-2 pr-4">
                     <span className={cn(

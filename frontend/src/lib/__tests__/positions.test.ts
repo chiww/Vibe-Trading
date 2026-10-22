@@ -110,6 +110,14 @@ describe("classifyAssetClass parity with backend rules", () => {
     ["BRK-B.US", "us_equity"],
     ["TD.TO", "ca_equity"],
     ["PNG.V", "ca_equity"],
+    // Argentina (#1543) plus the two suffixes that landed on the backend
+    // earlier and were never classified here, so they read as "other".
+    ["GGAL.BA", "ar_equity"],
+    ["GOOGL.BA", "ar_equity"],
+    ["PETR4.SA", "br_equity"],
+    ["HGLG11.SA", "br_equity"],
+    ["VOD.L", "uk_equity"],
+    ["VIC.VN", "vietnam_equity"],
     ["005930.KS", "kr_equity"],
     ["035720.KQ", "kr_equity"],
     ["RELIANCE.NS", "india_equity"],

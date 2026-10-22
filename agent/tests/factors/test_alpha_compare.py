@@ -76,7 +76,7 @@ def _stub_panel(monkeypatch: pytest.MonkeyPatch, n_rows: int = 80, n_cols: int =
     )
     monkeypatch.setattr(
         "src.factors.bench_runner._compute_forward_returns",
-        lambda panel_in: panel_in["close"].pct_change().shift(-1),
+        lambda panel_in, horizon=1: panel_in["close"].pct_change().shift(-1),
     )
 
 
@@ -137,7 +137,7 @@ class _FakeRegistry:
 def _fake_run_bench(metrics: dict[str, dict[str, Any]], *, status_by_zoo: dict[str, str] | None = None):
     """Build a ``run_bench`` double returning canned rows for the ``only`` ids."""
 
-    def _fake(*, zoo: str, universe: str, period: str, top: int, only: list[str], registry: Any, on_progress: Any = None) -> dict[str, Any]:  # noqa: ARG001
+    def _fake(*, zoo: str, universe: str, period: str, top: int, only: list[str], registry: Any, on_progress: Any = None, on_stage: Any = None) -> dict[str, Any]:  # noqa: ARG001
         if status_by_zoo and zoo in status_by_zoo:
             return {"status": "error", "error": status_by_zoo[zoo]}
         rows, skipped = [], []
@@ -219,7 +219,7 @@ def test_compare_groups_across_zoos(monkeypatch, capsys) -> None:
 
     fake = _fake_run_bench(metrics)
 
-    def _tracking(*, zoo, universe, period, top, only, registry, on_progress=None):  # noqa: ANN001, ARG001
+    def _tracking(*, zoo, universe, period, top, only, registry, on_progress=None, on_stage=None):  # noqa: ANN001, ARG001
         calls.append((zoo, tuple(only)))
         return fake(
             zoo=zoo, universe=universe, period=period, top=top, only=only,
@@ -311,7 +311,7 @@ def test_core_progress_counts_globally_across_zoos(monkeypatch) -> None:
     id_to_zoo = {"a": "alpha101", "b": "alpha101", "c": "gtja191"}
     metrics = {k: _metrics(0.02, 0.05, 0.40) for k in id_to_zoo}
 
-    def _fake(*, zoo, universe, period, top, only, registry, on_progress=None):  # noqa: ANN001, ARG001
+    def _fake(*, zoo, universe, period, top, only, registry, on_progress=None, on_stage=None):  # noqa: ANN001, ARG001
         rows = []
         for i, aid in enumerate(only, start=1):
             rows.append({"id": aid, **metrics[aid]})
@@ -350,3 +350,29 @@ def test_core_invalid_sort_falls_back_to_ir(monkeypatch) -> None:
     )
     assert env["sort"] == "ir"
     assert env["winner"] == "b"
+
+
+def test_compare_discloses_universe_excluded_alphas(monkeypatch, capsys) -> None:
+    """A compare shortlist must not silently swallow universe-excluded alphas."""
+    id_to_zoo = {"fund_us": "fundamental", "fund_cn": "fundamental"}
+    metrics = {"fund_cn": _metrics(0.01, 0.05, 0.20)}
+
+    def fake_run_bench(*, zoo, universe, period, top, only, registry, on_progress=None, on_stage=None):  # noqa: ARG001
+        rows = [{"id": aid, **metrics[aid]} for aid in only if aid in metrics]
+        excluded = [aid for aid in only if aid not in metrics]
+        return {
+            "status": "ok",
+            "zoo": zoo,
+            "rows": rows,
+            "skipped": [],
+            "universe_excluded": excluded,
+        }
+
+    _wire(monkeypatch, id_to_zoo, fake_run_bench)
+    rc, env = _run(capsys, _args(alpha_ids=["fund_us", "fund_cn"]))
+
+    assert rc == 0
+    assert env["n_compared"] == 1
+    assert env["n_skipped"] == 1
+    assert env["skipped"][0]["id"] == "fund_us"
+    assert "SEC US filings" in env["skipped"][0]["reason"]

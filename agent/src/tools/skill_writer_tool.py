@@ -35,6 +35,11 @@ _NON_LATIN_SCRIPT_RANGES = (
 )
 _SKILL_SLUG_DISALLOWED_RE = re.compile(rf"[^a-z0-9\-{_NON_LATIN_SCRIPT_RANGES}]")
 
+_FRONTMATTER_BLOCK_RE = re.compile(
+    r"^---[ \t]*\r?\n(?:(.*?)\r?\n)?---[ \t]*(?:\r?\n(.*))?$",
+    re.DOTALL,
+)
+
 
 def _sanitize_skill_name(name: str) -> str:
     """Sanitize skill name to a safe directory slug."""
@@ -44,6 +49,34 @@ def _sanitize_skill_name(name: str) -> str:
     if slug.strip("-") == "":
         return hashlib.sha256(name.strip().encode("utf-8")).hexdigest()[:8]
     return slug
+
+
+def _with_forced_frontmatter_name(content: str, slug: str) -> str:
+    """Force the frontmatter ``name:`` field to match the directory slug.
+
+    SkillsLoader identifies a skill by its frontmatter ``name``, not by its
+    directory slug. If the caller supplies its own frontmatter with a
+    different name, the skill becomes unreachable under the slug this tool
+    just advertised, and every lookup under that slug falls through to a
+    disk-fallback path that appends a fresh duplicate entry with no
+    de-duplication.
+    """
+    match = _FRONTMATTER_BLOCK_RE.match(content)
+    if not match:
+        return content
+    header_lines = (match.group(1) or "").split("\n") if match.group(1) else []
+    body = match.group(2) or ""
+    new_lines = []
+    replaced = False
+    for line in header_lines:
+        if line.partition(":")[0].strip() == "name":
+            new_lines.append(f"name: {slug}")
+            replaced = True
+        else:
+            new_lines.append(line)
+    if not replaced:
+        new_lines.insert(0, f"name: {slug}")
+    return f"---\n{chr(10).join(new_lines)}\n---\n{body}"
 
 class SaveSkillTool(BaseTool):
     """Save a successful workflow as a reusable skill."""
@@ -95,13 +128,16 @@ class SaveSkillTool(BaseTool):
         skill_dir.mkdir(parents=True, exist_ok=True)
         skill_path = skill_dir / "SKILL.md"
 
-        # Ensure frontmatter exists
+        # Ensure frontmatter exists, and that its name always matches the
+        # directory slug this tool is about to advertise as load_skill(slug).
         if not content.strip().startswith("---"):
             content = (
                 f"---\nname: {slug}\n"
                 f"description: User-created skill\n"
                 f"category: {category}\n---\n\n{content}"
             )
+        else:
+            content = _with_forced_frontmatter_name(content, slug)
 
         skill_path.write_text(content, encoding="utf-8")
         return json.dumps({
@@ -321,7 +357,7 @@ class SkillFileTool(BaseTool):
 
         # Validate subdirectory
         parts = Path(rel_path).parts
-        if len(parts) < 2 or parts[0] not in _ALLOWED_SUBDIRS:
+        if len(parts) < 2 or parts[0] not in _ALLOWED_SUBDIRS or ".." in parts:
             return json.dumps({
                 "status": "error",
                 "error": f"Path must start with one of: {', '.join(sorted(_ALLOWED_SUBDIRS))}. Got: '{parts[0] if parts else ''}'",
@@ -330,7 +366,9 @@ class SkillFileTool(BaseTool):
         target = skill_dir / rel_path
         # Safety: prevent path traversal
         try:
-            target.resolve().relative_to(skill_dir.resolve())
+            resolved_parts = target.resolve().relative_to(skill_dir.resolve()).parts
+            if len(resolved_parts) < 2 or resolved_parts[0] not in _ALLOWED_SUBDIRS:
+                raise ValueError("Path escapes allowed skill subdirectories")
         except ValueError:
             return json.dumps({"status": "error", "error": "Path escapes skill directory"})
 
@@ -353,15 +391,28 @@ class SkillFileTool(BaseTool):
         if Path(rel_path).name == "SKILL.md":
             return json.dumps({"status": "error", "error": "Cannot remove SKILL.md. Use delete_skill to remove the entire skill."})
 
+        # Validate subdirectory (same allowlist as _write_file, so remove can
+        # never touch a file write was never allowed to create)
+        parts = Path(rel_path).parts
+        if len(parts) < 2 or parts[0] not in _ALLOWED_SUBDIRS or ".." in parts:
+            return json.dumps({
+                "status": "error",
+                "error": f"Path must start with one of: {', '.join(sorted(_ALLOWED_SUBDIRS))}. Got: '{parts[0] if parts else ''}'",
+            })
+
         target = skill_dir / rel_path
         try:
-            target.resolve().relative_to(skill_dir.resolve())
+            resolved_parts = target.resolve().relative_to(skill_dir.resolve()).parts
+            if len(resolved_parts) < 2 or resolved_parts[0] not in _ALLOWED_SUBDIRS:
+                raise ValueError("Path escapes allowed skill subdirectories")
         except ValueError:
             return json.dumps({"status": "error", "error": "Path escapes skill directory"})
 
         if not target.exists():
             return json.dumps({"status": "error", "error": f"File not found: {rel_path}"})
 
+        if not target.is_file():
+            return json.dumps({"status": "error", "error": "Only auxiliary files can be removed"})
         target.unlink()
         return json.dumps({
             "status": "ok",
