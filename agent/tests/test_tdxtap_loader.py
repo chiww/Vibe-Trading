@@ -13,6 +13,7 @@ import pytest
 
 from backtest.loaders import tdxtap_loader
 from backtest.loaders.tdxtap_loader import DataLoader
+from tests.loader_contract import assert_loader_contract
 
 
 @pytest.fixture
@@ -72,6 +73,7 @@ def test_fetch_returns_the_loader_frame_contract(snapshot):
     assert frame.index.name == "trade_date"
     assert str(frame.index.dtype) == "datetime64[ns]"
     assert len(frame) == 10
+    assert_loader_contract(frame, context="tdxtap snapshot daily")
 
 
 def test_fetch_serves_all_three_markets(snapshot):

@@ -45,6 +45,8 @@ CONTRACT_SUITES = {
     "yahoo": "test_yahoo_loader.py",
     "yfinance": "test_yfinance_crypto.py",
 }
+# PRIVATE: 本分支自有源的契约套件，派生一行而非插进上表，避免与上游新增源冲突。
+CONTRACT_SUITES["tdxtap"] = "test_tdxtap_loader.py"
 
 
 def test_every_loader_has_a_canonical_contract_assertion():

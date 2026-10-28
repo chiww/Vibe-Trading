@@ -23,14 +23,25 @@ VIRTUAL_ENV=.venv uv pip install -e . --no-deps
 # 私有改动全部寄生在上游的结构上：文档守卫按注册源集合断言、路由与口径表
 # 按源名断言、年化表从 local 派生。上游动了这些结构，先红的是这几个文件，
 # 而 test_tdxtap_loader.py 反而可能照样绿。
-cd agent && ../.venv/bin/python -m pytest -q \
-  tests/test_tdxtap_loader.py \
-  tests/test_readme_counts.py \
-  tests/test_local_source_routing.py \
-  tests/test_registry.py \
-  tests/test_price_caliber.py \
-  tests/test_metrics.py \
-  tests/test_distribution_skill_manifest.py
+#
+# 固定清单之外，再自动带上所有对「全体注册源」做断言的测试：上游会不断新增这类
+# 守卫（loader_contract / loader_health 就是 10 月新加的，旧清单漏掉了它们，
+# 私有分支因此红了一个同步周期没人发现）。按符号 grep 而不是按文件名列举，
+# 新守卫出现时自动纳入。
+cd agent
+SYNC_TESTS=$( {
+  printf '%s\n' \
+    tests/test_tdxtap_loader.py \
+    tests/test_readme_counts.py \
+    tests/test_local_source_routing.py \
+    tests/test_registry.py \
+    tests/test_price_caliber.py \
+    tests/test_metrics.py \
+    tests/test_distribution_skill_manifest.py
+  grep -l -E 'VALID_SOURCES|LOADER_REGISTRY|coverage_errors' tests/test_*.py
+} | sort -u )
+# shellcheck disable=SC2086
+../.venv/bin/python -m pytest -q $SYNC_TESTS
 cd .. && PATH="$PWD/.venv/bin:$PATH" bash tools/ci_grep_gates.sh
 
 cat <<'NAV'
@@ -47,6 +58,9 @@ cat <<'NAV'
                                             按标的守卫、main() 的 JSON 信封
   agent/backtest/benchmark.py               offline 判据改问 registry 谓词、
                                             _infer_market 认 tdxtap 为 A 股源
+  agent/backtest/loader_health.py           EXCLUDED_PUBLIC_SOURCES 表后派生一行
+                                            （tdxtap 与 local 同为本机文件源，不巡检）
+  agent/tests/test_loader_contract.py       CONTRACT_SUITES 表后派生一行
   agent/tests/test_readme_counts.py         三个检查减去 _PRIVATE_SOURCES
   agent/tests/test_distribution_skill_manifest.py  数据源计数减去 _PRIVATE_SOURCES
   agent/tests/test_tdxtap_loader.py         整份新文件

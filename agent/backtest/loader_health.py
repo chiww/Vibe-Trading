@@ -53,6 +53,9 @@ EXCLUDED_PUBLIC_SOURCES = {
     # registered for explicit use but is out of the default chain.
     "mootdx": "upstream TDX protocol dead since 2026-07 (mootdx/mootdx#157)",
 }
+# PRIVATE: tdxtap 读的是本机 data-bridge 快照（由 tdxtap CLI 落盘），与 local 同类，
+# 不是公共端点，没有可巡检的网络通道。派生一行而非改上表，冲突面只剩这一处。
+EXCLUDED_PUBLIC_SOURCES["tdxtap"] = "operator snapshot exported by tdxtap, not a public endpoint"
 DEPENDENCIES = {
     "akshare": "akshare",
     "baostock": "baostock",
