@@ -2011,11 +2011,12 @@ class _PolicyMixin:
         # The result's unit follows the evidence the operands anchored to:
         # percent-named fields already carry points (#1820), an explicit
         # trailing *100 was normalized above, anything else is a fraction.
-        points = (
-            percent
-            and self._operands_read_as_points(
-                operands, symbol, records, scalar_parameters
-            )
+        points = percent and self._operands_read_as_points(
+            operands,
+            symbol,
+            records,
+            scalar_parameters,
+            referenced=scoped[0] if scoped is not None else (),
         )
         if points:
             # Convert the inputs before evaluating: two point-valued inputs
@@ -2041,6 +2042,7 @@ class _PolicyMixin:
         symbol: str | None,
         records: Sequence[EvidenceRecord],
         scalar_parameters: Sequence[float],
+        referenced: Sequence[EvidenceRecord] = (),
     ) -> bool:
         """Whether every data operand anchored only to percent-named fields.
 
@@ -2049,7 +2051,9 @@ class _PolicyMixin:
         must meet the result directly, not ``result * 100``. Conservative by
         construction: an operand whose magnitude also appears under a
         non-percent field makes the unit undecidable, and the caller keeps
-        the fraction reading.
+        the fraction reading. ``referenced`` are the records the declaration's
+        own ref resolved to: a field the claim names counts as an anchor of
+        the operand's unit even when its tool is not a market-data one.
         """
         data = [
             operand
@@ -2077,6 +2081,11 @@ class _PolicyMixin:
             and record.value is not None
             and _metric_kind_for_path(record.field) is not None
             and (not symbol or not record.symbol or record.symbol == symbol)
+        ]
+        candidates += [
+            record
+            for record in referenced
+            if record.status == "observed" and record.value is not None
         ]
         for operand in data:
             saw_percent = saw_plain = False

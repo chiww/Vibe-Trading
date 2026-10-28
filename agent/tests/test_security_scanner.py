@@ -171,6 +171,7 @@ def test_web_search_retries_without_backend_when_ddgs_rejects_backend_kw(
 def test_web_search_treats_no_results_as_empty_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("VIBE_TRADING_SEARCH_BING_FALLBACK", "0")
     class FakeDDGS:
         def __enter__(self):
             return self

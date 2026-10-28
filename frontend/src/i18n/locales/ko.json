@@ -2206,6 +2206,15 @@
       "failed": "읽지 못했습니다 — 합계에 포함되지 않음",
       "lastSuccess": "마지막으로 성공한 읽기 {{time}}",
       "noSuccess": "아직 성공한 읽기가 없습니다",
+      "cashDetails": "현금 및 융자",
+      "reportingCurrency": "보고 통화",
+      "financingLimit": "융자 한도",
+      "financingRemaining": "남은 융자 한도",
+      "cashAvailable": "사용 가능 현금",
+      "cashWithdrawable": "출금 가능 현금",
+      "cashFrozen": "동결 현금",
+      "cashSettling": "결제 대기 현금",
+      "binanceRestrictedLocation": "Binance가 이 읽기를 차단했습니다(HTTP 451). 현재 네트워크 위치가 제한되어 있습니다. 해당 지역에서 Binance를 사용할 수 있는지 확인하고 지원되는 공식 API 엔드포인트를 사용하세요.",
       "reconnect": "다시 연결",
       "retryRead": "다시 읽기"
     },
@@ -2324,7 +2333,9 @@
       "accountDefault": " · 브로커 기본값",
       "accountDeactivated": " · 비활성화됨",
       "accountSave": "이 계좌 사용",
-      "accountSaved": "계좌를 저장했습니다."
+      "accountSaved": "계좌를 저장했습니다.",
+      "host": "호스트",
+      "port": "포트"
     },
     "imports": {
       "title": "extraETF Investments 가져오기",
@@ -2349,7 +2360,8 @@
       "current": "현재 금액",
       "targetValue": "목표 금액",
       "change": "변경 금액"
-    }
+    },
+    "quoteAsOf": "{{time}} 기준 시세"
   },
   "analysis": {
     "updated": "업데이트됨",

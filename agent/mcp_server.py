@@ -3335,7 +3335,8 @@ def main():
         action="store_true",
         help="Register bash / background_run / cancel_background (OS process "
         "control — RCE surface). OFF by default for every transport; equivalent "
-        "to setting VIBE_TRADING_ENABLE_SHELL_TOOLS=1.",
+        "to setting VIBE_TRADING_ENABLE_SHELL_TOOLS=1 in the process environment "
+        "(.env is not consulted for this switch).",
     )
     args = parser.parse_args()
 
@@ -3349,6 +3350,11 @@ def main():
         logging.getLogger(__name__).warning("Legacy state migration failed", exc_info=True)
 
     _include_shell_tools = _resolve_include_shell_tools(args.enable_shell_tools)
+    # After the shell-tool decision: that switch must come from the launch
+    # flag or process env, never from a .env written for the web server.
+    from src.providers.llm import _ensure_dotenv
+
+    _ensure_dotenv()
     _registry = None
     _get_registry()  # pre-warm: avoids deadlock when first tools/call lazy-inits inside FastMCP worker thread
 

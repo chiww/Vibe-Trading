@@ -151,24 +151,25 @@ _MARKET_PATTERNS = [
         ),
         "futures",
     ),
-    # Global futures: product+month-code (e.g. ESZ4, CLF25, GCM2025)
-    (re.compile(r"^[A-Z]{2,4}[FGHJKMNQUVXZ]\d{1,2}$", re.I), "futures"),
+    # Global futures: product+month-code, including digit-bearing products
+    # (ESZ4, CLF25, GCM2025, M2KZ4, 6EZ2026). Pure numeric ids stay excluded.
+    (re.compile(r"^(?:[A-Z][A-Z0-9]{1,4}|[0-9][A-Z][A-Z0-9]{0,3})[FGHJKMNQUVXZ]\d{1,4}$", re.I), "futures"),
     # Global futures: product+YYMM (e.g. CL2412, ES2503)
-    (re.compile(r"^[A-Z]{2,4}\d{4}$", re.I), "futures"),
+    (re.compile(r"^(?:[A-Z][A-Z0-9]{1,4}|[0-9][A-Z][A-Z0-9]{0,3})\d{4}$", re.I), "futures"),
     # Global futures: bare product code with exchange (e.g. ES.CME)
-    (re.compile(r"^[A-Z]{2,4}\.(CME|CBOT|NYMEX|COMEX|ICE|EUREX)$", re.I), "futures"),
+    (re.compile(r"^(?:[A-Z][A-Z0-9]{0,4}|[0-9][A-Z][A-Z0-9]{0,3})\.(CME|CBOT|NYMEX|COMEX|ICE|EUREX)$", re.I), "futures"),
     # Global futures: dated contract carrying its venue (ESZ4.CME, CL2412.NYMEX,
     # GCM2025.COMEX). The bare dated forms above matched, and the continuous
     # form with a venue matched, but the combination fell through every pattern
     # to the a_share default below — a USD contract then priced in CNY under
     # T+1 with no shorting. Same class as #1394 on the global side. The product
-    # width opens to {1,4} here (not on the bare forms) because a recognized
+    # width includes single-letter products here (not on the bare forms): a recognized
     # futures venue already proves the class: CBOT lists single-letter grains
-    # (C, S, W, O), which ``^[A-Z]{2,4}\d{4}$`` cannot express without also
+    # (C, S, W, O), which a two-character minimum cannot express without also
     # claiming bare codes it has no venue to justify.
     (
         re.compile(
-            r"^[A-Z]{1,4}(?:[FGHJKMNQUVXZ]\d{1,2}|\d{4})\.(CME|CBOT|NYMEX|COMEX|ICE|EUREX)$",
+            r"^(?:[A-Z][A-Z0-9]{0,4}|[0-9][A-Z][A-Z0-9]{0,3})(?:[FGHJKMNQUVXZ]\d{1,4}|\d{4})\.(CME|CBOT|NYMEX|COMEX|ICE|EUREX)$",
             re.I,
         ),
         "futures",
@@ -195,7 +196,7 @@ _MARKET_PATTERNS = [
     # 6-character pairs, so narrowing it to {6} would drop shorter forms
     # already covered here for no gain.
     (re.compile(r"^[A-Z]{3,6}=X$", re.I), "forex"),
-    (re.compile(r"^[A-Z]{2,5}=F$", re.I), "futures"),
+    (re.compile(r"^(?:[A-Z][A-Z0-9]{0,4}|[0-9][A-Z][A-Z0-9]{0,3})=F$", re.I), "futures"),
     # Bare 6-character precious-metal / FX symbols (``XAUUSD``, ``XAGUSD``,
     # ``XPTUSD``, ``XPDUSD``, ``EURUSD``, ``GBPUSD``, ``USDJPY``, ``USDCHF``,
     # ``AUDUSD``, ``NZDUSD``, ``USDCAD``). Whitelist-restricted to a small
@@ -401,7 +402,9 @@ def _is_china_futures(code: str) -> bool:
         # collide with a CN product (e.g. ``M2412.CBOT`` — US soybean meal).
         return _EXCHANGE_ALIASES.get(parts[1], parts[1]) in _CHINA_EXCHANGES
     # Bare code (no exchange suffix): fall back to product-code heuristic.
-    m = re.match(r"([A-Za-z]+)\d+", parts[0])
+    # Match the whole Chinese delivery code: M2K and M6E begin with the
+    # Chinese soybean-meal product M but are not M contracts.
+    m = re.fullmatch(r"([A-Za-z]+)\d+", parts[0])
     if m:
         product = m.group(1).lower()
         if product in _CN_FUTURES_PRODUCTS:
@@ -617,6 +620,9 @@ def _normalize_symbol(symbol: str) -> str:
     # suffix the pair misses the spread and swap tables and gets the defaults.
     if s.upper().endswith("=X"):
         s = s[:-2]
+        # Yahoo's three-letter form (JPY=X) is the pair quoted against USD.
+        if len(s) == 3:
+            s = "USD" + s
     if "/" in s:
         return s.upper()
     if len(s) == 6:

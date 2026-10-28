@@ -243,8 +243,14 @@ def effective_bars_per_year(index: Any, default: int = 252) -> int:
         diff = index[-1] - index[0]
     except (IndexError, TypeError):
         return default
-    calendar_days = diff.days if hasattr(diff, "days") else 0
-    years = calendar_days / 365.25 if calendar_days > 0 else 1.0
+    # ``diff.days`` truncates the fractional day off the span, which turns the
+    # denominator into whole calendar days elapsed rather than the calendar
+    # years this function's contract names — on an intraday series that
+    # inflates the factor (72 hourly bars span 2d23h, not 2d).
+    calendar_days = (
+        diff.total_seconds() / 86400.0 if hasattr(diff, "total_seconds") else 0.0
+    )
+    years = calendar_days / 365.25 if calendar_days >= 1.0 else 1.0
     return int(n / years) if years > 0 else default
 
 

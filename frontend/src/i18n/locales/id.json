@@ -2206,6 +2206,15 @@
       "failed": "Tidak dapat dibaca — tidak dihitung dalam total",
       "lastSuccess": "Terakhir berhasil dibaca {{time}}",
       "noSuccess": "Belum pernah berhasil dibaca",
+      "cashDetails": "Kas dan pembiayaan",
+      "reportingCurrency": "Mata uang laporan",
+      "financingLimit": "Batas pembiayaan",
+      "financingRemaining": "Sisa pembiayaan",
+      "cashAvailable": "Kas tersedia",
+      "cashWithdrawable": "Kas yang dapat ditarik",
+      "cashFrozen": "Kas dibekukan",
+      "cashSettling": "Kas dalam penyelesaian",
+      "binanceRestrictedLocation": "Binance memblokir pembacaan ini (HTTP 451): lokasi jaringan saat ini dibatasi. Periksa ketersediaan Binance di wilayah Anda dan gunakan endpoint API yang didukung.",
       "reconnect": "Hubungkan ulang",
       "retryRead": "Coba baca lagi"
     },
@@ -2324,7 +2333,9 @@
       "accountDefault": " · default broker",
       "accountDeactivated": " · dinonaktifkan",
       "accountSave": "Gunakan akun ini",
-      "accountSaved": "Akun tersimpan."
+      "accountSaved": "Akun tersimpan.",
+      "host": "Host",
+      "port": "Port"
     },
     "imports": {
       "title": "Impor extraETF Investments",
@@ -2349,7 +2360,8 @@
       "current": "Nilai saat ini",
       "targetValue": "Nilai target",
       "change": "Perubahan nilai"
-    }
+    },
+    "quoteAsOf": "Harga per {{time}}"
   },
   "analysis": {
     "updated": "Diperbarui",

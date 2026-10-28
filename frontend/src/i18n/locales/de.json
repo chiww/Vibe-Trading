@@ -2206,6 +2206,15 @@
       "failed": "Konnte nicht gelesen werden — nicht in der Summe enthalten",
       "lastSuccess": "Letzter erfolgreicher Abruf {{time}}",
       "noSuccess": "Noch kein erfolgreicher Abruf",
+      "cashDetails": "Barmittel und Finanzierung",
+      "reportingCurrency": "Berichtswährung",
+      "financingLimit": "Finanzierungslimit",
+      "financingRemaining": "Verbleibende Finanzierung",
+      "cashAvailable": "Verfügbares Guthaben",
+      "cashWithdrawable": "Auszahlbares Guthaben",
+      "cashFrozen": "Gesperrtes Guthaben",
+      "cashSettling": "Guthaben in Abwicklung",
+      "binanceRestrictedLocation": "Binance hat diesen Abruf (HTTP 451) blockiert: Der aktuelle Netzwerkstandort ist eingeschränkt. Prüfe, ob Binance in deiner Region verfügbar ist, und verwende den unterstützten API-Endpunkt.",
       "reconnect": "Neu verbinden",
       "retryRead": "Lesen wiederholen"
     },
@@ -2324,7 +2333,9 @@
       "accountDefault": " · Broker-Standard",
       "accountDeactivated": " · deaktiviert",
       "accountSave": "Dieses Konto verwenden",
-      "accountSaved": "Konto gespeichert."
+      "accountSaved": "Konto gespeichert.",
+      "host": "Host",
+      "port": "Port"
     },
     "imports": {
       "title": "extraETF Investments importieren",
@@ -2349,7 +2360,8 @@
       "current": "Aktueller Wert",
       "targetValue": "Zielwert",
       "change": "Wertänderung"
-    }
+    },
+    "quoteAsOf": "Kursstand: {{time}}"
   },
   "analysis": {
     "updated": "Aktualisiert",

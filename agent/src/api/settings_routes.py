@@ -45,6 +45,7 @@ class LLMProviderOption(BaseModel):
     api_key_env: Optional[str] = None
     base_url_env: str
     default_model: str
+    model_options: List[str] = Field(default_factory=list)
     default_base_url: str
     base_url_options: List[str] = Field(default_factory=list)
     api_key_required: bool = True
@@ -322,6 +323,14 @@ async def _list_provider_models(
 ) -> LLMModelsResponse:
     """Best-effort live model discovery with a safe editable fallback."""
     fallback = [provider.default_model]
+    # Keep the direct MiniMax picker curated. Saved/custom model names remain
+    # editable, and custom endpoints retain their own live model discovery.
+    if provider.name == "minimax" and base_url.rstrip("/") in provider.base_url_options:
+        return LLMModelsResponse(
+            provider=provider.name,
+            models=provider.model_options or fallback,
+            source="default",
+        )
     if provider.auth_type in {"oauth", "gh_cli"}:
         return LLMModelsResponse(
             provider=provider.name,
@@ -355,6 +364,13 @@ async def _list_provider_models(
             source="default",
             warning_code="model_list_unavailable",
         )
+
+    # Prefer configured recommendations without deleting discovered routes.
+    # Paid variants, legacy models and future releases remain selectable.
+    official_endpoints = {provider.default_base_url, *provider.base_url_options}
+    if base_url.rstrip("/") in official_endpoints:
+        preferred = [model for model in provider.model_options if model in models]
+        models = preferred + [model for model in models if model not in preferred]
 
     discovered = bool(models)
     if provider.default_model not in models:

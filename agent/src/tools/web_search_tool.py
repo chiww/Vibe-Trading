@@ -254,25 +254,18 @@ class WebSearchTool(BaseTool):
                         raw = list(client.text(query, max_results=max_results, backend=backends))
                     else:
                         raw = list(client.text(query, max_results=max_results))
-            except TypeError:
+            except TypeError as exc:
                 # Older ddgs/duckduckgo_search without the backend kwarg.
+                last_error = exc
                 supports_backend = False
                 continue
             except Exception as exc:  # noqa: BLE001 — surface a clean error to the agent
-                last_error = exc
-                # "No results found" is a definitive empty answer, not a transient
-                # failure — retrying or switching engines won't change it.
+                # An empty aggregator answer says nothing about the fallback
+                # sources. Treat its exception and an empty list identically.
                 if "no results" in str(exc).lower():
-                    return json.dumps(
-                        {
-                            "status": "ok",
-                            "query": query,
-                            "backends": backends if supports_backend else "duckduckgo",
-                            "results": [],
-                            "note": "No results found for this query across the search engines.",
-                        },
-                        ensure_ascii=False,
-                    )
+                    last_error = None
+                    break
+                last_error = exc
                 logger.warning("web_search attempt %d/%d failed: %s", attempt, _MAX_ATTEMPTS, exc)
                 # Network/egress errors (timeout, connection refused, unreachable)
                 # won't recover on retry — stop retrying ddgs and fall through to
@@ -284,6 +277,9 @@ class WebSearchTool(BaseTool):
                     time.sleep(_BACKOFF_BASE_SECONDS * attempt)
                 continue
 
+            if not raw:
+                last_error = None
+                break
             results = [
                 {
                     "title": r.get("title", ""),
@@ -304,11 +300,12 @@ class WebSearchTool(BaseTool):
             )
             return json.dumps(payload, ensure_ascii=False)
 
-        # Fallback chain when every ddgs backend is blocked (common behind
+        # Fallback chain when ddgs is empty or blocked (common behind
         # restricted egress, e.g. CN hosts without VPN): sogou first (best CN
         # query quality), then cn.bing (real URLs, broader). Toggle via
         # VIBE_TRADING_SEARCH_BING_FALLBACK (default on).
         fb_err = "disabled"
+        fb_errors: list[str] = []
         if get_env_config().agent_tuning.vibe_trading_search_bing_fallback:
             for fb_name, fb_fn in (("sogou", _sogou_search), ("bing_cn", _bing_cn_search)):
                 try:
@@ -331,14 +328,26 @@ class WebSearchTool(BaseTool):
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("%s fallback failed: %s", fb_name, exc)
                     fb_err = f"{fb_name}: {exc}"
+                    fb_errors.append(fb_err)
                     continue
+        if last_error is None and not fb_errors:
+            return json.dumps(
+                {
+                    "status": "ok",
+                    "query": query,
+                    "backends": backends if supports_backend else "duckduckgo",
+                    "results": [],
+                    "note": "No results found after trying the enabled search sources.",
+                },
+                ensure_ascii=False,
+            )
         return json.dumps(
             {
                 "status": "error",
                 "error": (
-                    f"Web search failed after {_MAX_ATTEMPTS} attempts "
-                    f"(backends: {backends if supports_backend else 'duckduckgo'}): {last_error}. "
-                    f"CN fallbacks (sogou, bing_cn): {fb_err}. "
+                    f"Web search failed after {attempt} ddgs attempts "
+                    f"(backends: {backends if supports_backend else 'duckduckgo'}): {last_error or 'no results'}. "
+                    f"CN fallbacks (sogou, bing_cn): {'; '.join(fb_errors) or fb_err}. "
                     "Retry shortly, set VIBE_TRADING_SEARCH_BACKENDS to a different engine list, "
                     "set VIBE_TRADING_SEARCH_BING_FALLBACK=0 to disable CN fallback, or read a "
                     "known URL directly with read_url."

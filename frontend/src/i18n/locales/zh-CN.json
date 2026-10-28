@@ -2206,6 +2206,15 @@
       "failed": "读取失败 — 未计入合计",
       "lastSuccess": "上一次成功读取于 {{time}}",
       "noSuccess": "尚未成功读取过",
+      "cashDetails": "现金与融资",
+      "reportingCurrency": "报告币种",
+      "financingLimit": "融资额度",
+      "financingRemaining": "剩余融资额度",
+      "cashAvailable": "可用现金",
+      "cashWithdrawable": "可提取现金",
+      "cashFrozen": "冻结现金",
+      "cashSettling": "待结算现金",
+      "binanceRestrictedLocation": "Binance 返回 HTTP 451，当前网络出口地区受限，暂时无法读取。请确认所在地区可使用 Binance，并检查账户对应的官方 API 入口。",
       "reconnect": "重新连接",
       "retryRead": "重试读取"
     },
@@ -2324,7 +2333,9 @@
       "accountDefault": " · 券商默认",
       "accountDeactivated": " · 已停用",
       "accountSave": "使用这个账户",
-      "accountSaved": "账户已保存。"
+      "accountSaved": "账户已保存。",
+      "host": "主机",
+      "port": "端口"
     },
     "imports": {
       "title": "导入 extraETF Investments",
@@ -2349,7 +2360,8 @@
       "current": "当前金额",
       "targetValue": "目标金额",
       "change": "调整金额"
-    }
+    },
+    "quoteAsOf": "报价时间：{{time}}"
   },
   "analysis": {
     "updated": "已更新",

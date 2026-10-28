@@ -2170,6 +2170,15 @@
       "failed": "Okunamadı; toplama katılmadı",
       "lastSuccess": "Son başarılı okuma: {{time}}",
       "noSuccess": "Henüz başarılı okuma yok",
+      "cashDetails": "Nakit ve finansman",
+      "reportingCurrency": "Raporlama para birimi",
+      "financingLimit": "Finansman limiti",
+      "financingRemaining": "Kalan finansman",
+      "cashAvailable": "Kullanılabilir nakit",
+      "cashWithdrawable": "Çekilebilir nakit",
+      "cashFrozen": "Bloke nakit",
+      "cashSettling": "Takas bekleyen nakit",
+      "binanceRestrictedLocation": "Binance bu okumayı engelledi (HTTP 451): mevcut ağ konumu kısıtlı. Bölgenizde Binance kullanılabilirliğini kontrol edin ve desteklenen API uç noktasını kullanın.",
       "reconnect": "Yeniden bağlan",
       "retryRead": "Okumayı yeniden dene"
     },
@@ -2288,7 +2297,9 @@
       "accountDefault": " · aracı kurum varsayılanı",
       "accountDeactivated": " · devre dışı",
       "accountSave": "Bu hesabı kullan",
-      "accountSaved": "Hesap kaydedildi."
+      "accountSaved": "Hesap kaydedildi.",
+      "host": "Sunucu",
+      "port": "Bağlantı noktası"
     },
     "imports": {
       "title": "extraETF Investments içe aktar",
@@ -2313,7 +2324,8 @@
       "current": "Mevcut değer",
       "targetValue": "Hedef değer",
       "change": "Değer değişimi"
-    }
+    },
+    "quoteAsOf": "{{time}} itibarıyla fiyat"
   },
   "navigation": {
     "menu": "Özelliklere göz at",

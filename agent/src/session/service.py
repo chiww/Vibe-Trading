@@ -43,6 +43,27 @@ _TERMINAL_EVENTS = {
 }
 
 
+def _cancel_session_swarm_runs(session_id: str) -> int:
+    """Signal every live swarm run started by this session.
+
+    Imported lazily: ``src.swarm.runtime`` pulls in worker/tool modules that
+    would create an import cycle at module load, and this helper is only needed
+    on the cancel path.
+
+    Args:
+        session_id: Session whose swarm runs should stop.
+
+    Returns:
+        Number of runs that received a cancel signal.
+    """
+    try:
+        from src.swarm.runtime import cancel_runs_for_session
+    except Exception:  # pragma: no cover - swarm extra missing in slim installs
+        logger.debug("Swarm runtime unavailable; skipping swarm cancel", exc_info=True)
+        return 0
+    return cancel_runs_for_session(session_id)
+
+
 class SessionBusyError(RuntimeError):
     """Raised when a session already has an in-flight run.
 
@@ -242,9 +263,28 @@ class SessionService:
         return self.store.list_sessions(limit)
 
     def delete_session(self, session_id: str) -> bool:
-        """Delete a session."""
-        self.event_bus.clear(session_id)
-        return self.store.delete_session(session_id)
+        """Delete an idle session after purging its searchable text.
+
+        Args:
+            session_id: Session to delete.
+
+        Returns:
+            Whether the on-disk session existed and was deleted.
+
+        Raises:
+            SessionBusyError: If a run could recreate the deleted content.
+            Exception: If the search purge fails; the on-disk session remains
+                available so the user can retry instead of receiving false success.
+        """
+        with self._inflight_lock:
+            if session_id in self._inflight:
+                raise SessionBusyError("Stop the active run before deleting its session")
+            # Purge even when the directory is absent: a retry can clear stale
+            # index rows left by an older version or an interrupted deletion.
+            self._search_index.remove_session(session_id)
+            deleted = self.store.delete_session(session_id)
+            self.event_bus.clear(session_id)
+            return deleted
 
     async def send_message(
         self,
@@ -327,6 +367,9 @@ class SessionService:
         loop = self._active_loops.get(session_id)
         if loop is not None:
             loop.cancel()
+            # The loop only stops the ReAct cycle; tools that spawned their own
+            # background work (swarm) keep burning tokens unless told directly.
+            _cancel_session_swarm_runs(session_id)
             return True
         # No loop yet: the run is still building its registry. Cancel the task
         # itself so the claim is released instead of stranding the session.
@@ -334,6 +377,11 @@ class SessionService:
         if task is not None and not task.done():
             self._user_cancel_requests.add(session_id)
             task.cancel()
+            _cancel_session_swarm_runs(session_id)
+            return True
+        # Loop already returned (budget exhausted, turn ended) but a swarm it
+        # started may still be running in the background.
+        if _cancel_session_swarm_runs(session_id):
             return True
         return False
 
@@ -533,6 +581,11 @@ class SessionService:
             """Forward MCP server-name collision warnings to the operator event channel."""
             self.event_bus.emit(session_id, "mcp.warning", {"attempt_id": attempt_id, "message": msg})
 
+        # One flag per turn, shared by the AgentLoop and the swarm tool. The
+        # loop's own cancel() sets it, so a user stop reaches long-running tools
+        # without a second cancellation channel that can drift out of sync.
+        turn_cancel = threading.Event()
+
         registry = await loop.run_in_executor(
             _AGENT_EXECUTOR,
             lambda: build_registry(
@@ -542,6 +595,7 @@ class SessionService:
                 session_id=session_id,
                 event_callback=event_callback,
                 warn_callback=_mcp_collision_warn,
+                cancel_event=turn_cancel,
             ),
         )
 
@@ -553,6 +607,7 @@ class SessionService:
             event_callback=event_callback,
             max_iterations=get_env_config().agent_tuning.vibe_trading_agent_max_iterations,
             persistent_memory=pm,
+            cancel_event=turn_cancel,
         )
         self._active_loops[session_id] = agent
 

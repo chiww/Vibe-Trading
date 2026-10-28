@@ -2206,6 +2206,15 @@
       "failed": "読み取れませんでした — 合計に含まれていません",
       "lastSuccess": "最後に読み取れたのは {{time}}",
       "noSuccess": "まだ一度も読み取れていません",
+      "cashDetails": "現金と信用枠",
+      "reportingCurrency": "報告通貨",
+      "financingLimit": "信用取引枠",
+      "financingRemaining": "残りの信用取引枠",
+      "cashAvailable": "利用可能な現金",
+      "cashWithdrawable": "出金可能な現金",
+      "cashFrozen": "凍結中の現金",
+      "cashSettling": "決済待ちの現金",
+      "binanceRestrictedLocation": "Binance が読み取りを拒否しました（HTTP 451）。現在のネットワーク所在地は利用制限の対象です。お住まいの地域で Binance が利用可能か確認し、サポート対象の公式 API エンドポイントを使用してください。",
       "reconnect": "再接続",
       "retryRead": "再読み込み"
     },
@@ -2324,7 +2333,9 @@
       "accountDefault": "・ブローカーの既定",
       "accountDeactivated": "・無効化済み",
       "accountSave": "この口座を使う",
-      "accountSaved": "口座を保存しました。"
+      "accountSaved": "口座を保存しました。",
+      "host": "ホスト",
+      "port": "ポート"
     },
     "imports": {
       "title": "extraETF Investments をインポート",
@@ -2349,7 +2360,8 @@
       "current": "現在の評価額",
       "targetValue": "目標額",
       "change": "変更額"
-    }
+    },
+    "quoteAsOf": "{{time}} 時点の価格"
   },
   "analysis": {
     "updated": "更新済み",

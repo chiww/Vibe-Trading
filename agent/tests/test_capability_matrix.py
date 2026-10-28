@@ -54,7 +54,7 @@ def test_paper_order_capability_never_becomes_a_live_permission() -> None:
                 assert "orders.place" not in rows[profile.id][7]
     assert rows["alpaca-live-trade"][8] == "mandate required"
     assert rows["robinhood-live-mcp"][8] == "mandate required"
-    assert rows["robinhood-live-mcp-readonly"][6] == "none declared"
+    assert rows["robinhood-live-mcp-readonly"][6] == "remote_mcp"  # quotes.read prices positions
     assert "positions.edit" in rows["etoro-live-trade"][7]
 
 

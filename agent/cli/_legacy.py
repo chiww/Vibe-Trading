@@ -4217,6 +4217,9 @@ def _print_portfolio_snapshot(snapshot: dict[str, Any]) -> None:
         )
     console.print(accounts)
     for row in snapshot.get("accounts", []):
+        if row.get("status") == "ok" and row.get("balance_details"):
+            console.print(rich_escape(str(row.get("label") or row.get("broker") or "")))
+            _print_balance_details(row["balance_details"])
         if row.get("import_metadata"):
             meta = row["import_metadata"]
             console.print(f"extraETF file mtime: {rich_escape(meta['source_mtime'])}; expires: {rich_escape(meta['expires_at'])}; holdings only, no cash")
@@ -4543,6 +4546,8 @@ def cmd_connector_setup(
     label: str | None = None,
     skip_check: bool = False,
     account: str | None = None,
+    host: str | None = None,
+    port: int | None = None,
 ) -> int:
     """Create a local read-only connection and collect secrets outside AI prompts.
 
@@ -4554,10 +4559,14 @@ def cmd_connector_setup(
             profile, the account selection that needs the broker).
         account: Account to scope an account-scoped connection to; without it
             the user picks from the broker's account list.
+        host: Optional connection-specific IBKR/Futu gateway host; requires port.
+        port: Optional connection-specific gateway port; requires host.
 
     Returns:
         The process exit code.
     """
+    from dataclasses import replace
+
     from src.trading.connections import (
         ConnectionStore,
         credential_field_catalog,
@@ -4571,9 +4580,13 @@ def cmd_connector_setup(
         profile = profile_by_id(profile_id)
         if not is_readonly_connection_profile(profile):
             raise ValueError(f"{profile.id} is not a read-only connection profile")
+        if (host is None) != (port is None):
+            raise ValueError("gateway endpoint requires both --host and --port")
         local_id = str(connection_id or f"{profile.connector}-{profile.environment}").strip().lower()
         store = ConnectionStore()
         connection = store.ensure(local_id, profile.id, label or profile.label)
+        if host is not None:
+            connection = store.save(replace(connection, endpoint={"host": host, "port": port}))
         fields = credential_field_catalog(profile.id)
         names = [str(field["name"]) for field in fields]
         status = store.credentials.status(connection.id, names) if names else {}
@@ -4751,7 +4764,35 @@ def _print_connector_balances(result: dict[str, Any]) -> int:
             cell(row.get("maintenance_margin")),
         )
     console.print(table)
+    _print_balance_details(rows)
     return EXIT_SUCCESS
+
+
+def _print_balance_details(rows: list[dict[str, Any]]) -> None:
+    """Print broker cash legs and financing in each reported currency.
+
+    Args:
+        rows: Balance rows from a connector or a saved portfolio snapshot.
+    """
+    cell = lambda value: "—" if value is None else rich_escape(str(value))  # noqa: E731
+    for row in rows:
+        if not row.get("cash_infos") and all(row.get(key) is None for key in (
+            "max_finance_amount", "remaining_finance_amount"
+        )):
+            continue
+        currency = cell(row.get("currency"))
+        console.print(f"Cash and financing · {currency}")
+        console.print(f"Financing limit: {cell(row.get('max_finance_amount'))} {currency}; "
+                      f"Remaining financing: {cell(row.get('remaining_finance_amount'))} {currency}")
+        table = Table(box=box.SIMPLE_HEAVY)
+        for name in ("Currency", "Available", "Withdrawable", "Frozen", "Settling"):
+            table.add_column(name)
+        for cash in row.get("cash_infos") or []:
+            table.add_row(*(cell(cash.get(key)) for key in (
+                "currency", "available_cash", "withdraw_cash", "frozen_cash", "settling_cash"
+            )))
+        if table.row_count:
+            console.print(table)
 
 
 def _print_connector_assets(result: dict[str, Any]) -> int:
@@ -5220,7 +5261,10 @@ def cmd_connector_history(
         console.print(f"[red]{rich_escape(str(result.get('error')))}[/red]")
         return EXIT_RUN_FAILED
     rows = result.get("bars", [])
-    if not rows:
+    # The table used to keep only the last 20 bars, so --limit 40 still
+    # printed 20. Honor the same limit that was sent to the connector.
+    shown = rows[-limit:] if isinstance(limit, int) and limit >= 1 else []
+    if not shown:
         console.print("[dim]No historical bars returned.[/dim]")
         return EXIT_SUCCESS
     table = Table(title=f"History {result.get('symbol', symbol)} · {result.get('profile_id')}", box=box.SIMPLE_HEAVY)
@@ -5230,7 +5274,7 @@ def cmd_connector_history(
     table.add_column("Low", justify="right")
     table.add_column("Close", justify="right")
     table.add_column("Volume", justify="right")
-    for row in rows[-20:]:
+    for row in shown:
         table.add_row(
             str(row.get("date") or ""),
             str(row.get("open") or ""),
@@ -5389,6 +5433,8 @@ def _dispatch_connector(args: argparse.Namespace) -> int:
             label=args.label,
             skip_check=args.skip_check,
             account=args.account,
+            host=args.host,
+            port=args.port,
         )
     if sub == "select-account":
         return cmd_connector_select_account(
@@ -5744,6 +5790,12 @@ def _build_parser() -> argparse.ArgumentParser:
     connector_setup.add_argument("--label", default=None)
     connector_setup.add_argument("--skip-check", action="store_true")
     connector_setup.add_argument(
+        "--host", default=None, help="Connection-specific IBKR/Futu gateway host (requires --port)"
+    )
+    connector_setup.add_argument(
+        "--port", type=int, default=None, help="Connection-specific gateway port (requires --host)"
+    )
+    connector_setup.add_argument(
         "--account",
         default=None,
         help="Account to scope an account-scoped connection (Robinhood) to; prompts when omitted",
@@ -6003,7 +6055,7 @@ _PROVIDER_CHOICES: list[dict[str, str | None]] = [
         "key_env": "MINIMAX_API_KEY",
         "base_env": "MINIMAX_BASE_URL",
         "base_url": "https://api.minimax.io/v1",
-        "model": "MiniMax-M3",
+        "model": "MiniMax-M3.1-Flash",
         "key_prefix": None,
         "key_placeholder": "api-key...",
     },

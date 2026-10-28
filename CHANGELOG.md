@@ -7,6 +7,36 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Global futures routing and pricing**: digit-bearing contracts such as
+  `M2K=F` and `6EZ2026.CME`, including `local:` inputs, reach the global
+  futures engine with their full product code. OJ and ZR use quote-unit
+  multipliers of 150 and 2,000; MYM and M2K use the existing micro-contract
+  commission convention. Missing pricing-table entries are recorded in run
+  diagnostics instead of silently appearing to be verified prices (#1965,
+  #1966, #1968).
+- **Longbridge cash disclosures** now preserve each currency's available,
+  withdrawable, frozen and settling cash, plus reported financing limits,
+  through account reads, Portfolio snapshots, the CLI, API, agent context and
+  the Web account card. Negative balances and unavailable values remain
+  distinct (#1940).
+- **Portfolio errors** redact credential-bearing URLs and error text on
+  refresh, progress and historical snapshot reads. Binance's regional HTTP
+  451 restriction has an explicit, localized explanation (#1937).
+- **Audit rotation** verifies the complete segmented chain on repeated
+  rotations, allocates archive numbers past gaps and four-digit counters,
+  and refuses to overwrite an existing archive (#1962).
+- **Research data quality**: a single IC observation has no sample standard
+  deviation; repeated decimal grouping is accepted only with valid digit
+  groups, preserving explicit separator choices and refusing malformed
+  amounts (#1963, #1964).
+- **Weixin attachments** use exclusively created local files so repeated
+  names, identical URLs and concurrent downloads cannot overwrite earlier
+  attachments (#1967).
+- **MiniMax Flash** is the default for direct MiniMax endpoints, with
+  reasoning history retained across tool calls. Official gateway model
+  lists prefer discovered current routes while keeping paid variants and
+  other available models selectable (#1936).
+
 - **A retried provider error no longer halts live model decisions for the
   day**. 0.1.18 announced every failed stream, compaction call or cancelled
   response that reported no usage as missing usage, which the live decision

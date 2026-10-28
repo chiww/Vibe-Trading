@@ -23,7 +23,7 @@ from backtest.metrics import bar_returns, buy_and_hold_return
 
 MARKET_BENCHMARKS: dict[str, Optional[str]] = {
     "us_equity":  "SPY",
-    "hk_equity":  "HK.03100",   # Hang Seng China Enterprises ETF
+    "hk_equity":  "2828.HK",    # Hang Seng China Enterprises Index ETF
     "ca_equity":  "XIC.TO",     # S&P/TSX Capped Composite ETF
     "br_equity":  "BOVA11.SA",  # iShares Ibovespa ETF
     "a_share":    "000300.SH",  # CSI 300 (China A-share core index)

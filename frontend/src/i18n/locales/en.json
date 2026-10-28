@@ -2206,6 +2206,15 @@
       "failed": "Could not be read — not counted in the total",
       "lastSuccess": "Last successful read {{time}}",
       "noSuccess": "No successful read yet",
+      "cashDetails": "Cash and financing",
+      "reportingCurrency": "Reporting currency",
+      "financingLimit": "Financing limit",
+      "financingRemaining": "Remaining financing",
+      "cashAvailable": "Available",
+      "cashWithdrawable": "Withdrawable",
+      "cashFrozen": "Frozen",
+      "cashSettling": "Settling",
+      "binanceRestrictedLocation": "Binance blocked this read (HTTP 451): the current network location is restricted. Check Binance availability for your region and use its supported API endpoint.",
       "reconnect": "Reconnect",
       "retryRead": "Retry read"
     },
@@ -2324,7 +2333,9 @@
       "accountDefault": " · broker default",
       "accountDeactivated": " · deactivated",
       "accountSave": "Use this account",
-      "accountSaved": "Account saved."
+      "accountSaved": "Account saved.",
+      "host": "Host",
+      "port": "Port"
     },
     "imports": {
       "title": "Import extraETF Investments",
@@ -2349,7 +2360,8 @@
       "current": "Current value",
       "targetValue": "Target value",
       "change": "Value change"
-    }
+    },
+    "quoteAsOf": "Quote as of {{time}}"
   },
   "analysis": {
     "updated": "Updated",

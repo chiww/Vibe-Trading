@@ -27,8 +27,9 @@ _ALLOWED_WRITE_ROOTS_ENV = "VIBE_TRADING_ALLOWED_WRITE_ROOTS"
 
 # MCP clients spawn the server themselves, so a shell export never reaches it.
 _ENV_SCOPE_HINT = (
-    "Under an MCP client, set it in that client's server env block — "
-    "exporting it in a shell does not reach the spawned server."
+    "Put it in the runtime .env (read by both the web and MCP servers) or "
+    "in the MCP client's server env block — exporting it in a shell does not "
+    "reach a spawned MCP server."
 )
 
 # The env var that widens each resolve_safe_path purpose; rejections name it

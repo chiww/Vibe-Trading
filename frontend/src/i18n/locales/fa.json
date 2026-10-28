@@ -2206,6 +2206,15 @@
       "failed": "خوانده نشد — در جمع لحاظ نمی‌شود",
       "lastSuccess": "آخرین خواندن موفق {{time}}",
       "noSuccess": "هنوز خواندن موفقی نداشته است",
+      "cashDetails": "وجه نقد و تأمین مالی",
+      "reportingCurrency": "ارز گزارش",
+      "financingLimit": "سقف تأمین مالی",
+      "financingRemaining": "تأمین مالی باقی‌مانده",
+      "cashAvailable": "وجه نقد در دسترس",
+      "cashWithdrawable": "وجه نقد قابل برداشت",
+      "cashFrozen": "وجه نقد مسدودشده",
+      "cashSettling": "وجه نقد در حال تسویه",
+      "binanceRestrictedLocation": "Binance این خواندن را مسدود کرد (HTTP 451): موقعیت فعلی شبکه محدود است. دسترس‌پذیری Binance در منطقه خود را بررسی کنید و از درگاه API پشتیبانی‌شده استفاده کنید.",
       "reconnect": "اتصال دوباره",
       "retryRead": "تلاش دوباره برای خواندن"
     },
@@ -2324,7 +2333,9 @@
       "accountDefault": " · پیش‌فرض کارگزار",
       "accountDeactivated": " · غیرفعال‌شده",
       "accountSave": "استفاده از این حساب",
-      "accountSaved": "حساب ذخیره شد."
+      "accountSaved": "حساب ذخیره شد.",
+      "host": "میزبان",
+      "port": "درگاه"
     },
     "imports": {
       "title": "وارد کردن extraETF Investments",
@@ -2349,7 +2360,8 @@
       "current": "ارزش فعلی",
       "targetValue": "ارزش هدف",
       "change": "تغییر ارزش"
-    }
+    },
+    "quoteAsOf": "قیمت در {{time}}"
   },
   "analysis": {
     "updated": "به‌روز شد",

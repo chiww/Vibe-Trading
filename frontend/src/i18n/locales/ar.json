@@ -2206,6 +2206,15 @@
       "failed": "تعذّرت قراءته — غير محتسب في الإجمالي",
       "lastSuccess": "آخر قراءة ناجحة {{time}}",
       "noSuccess": "لا توجد قراءة ناجحة بعد",
+      "cashDetails": "النقد والتمويل",
+      "reportingCurrency": "عملة التقرير",
+      "financingLimit": "حد التمويل",
+      "financingRemaining": "التمويل المتبقي",
+      "cashAvailable": "النقد المتاح",
+      "cashWithdrawable": "النقد القابل للسحب",
+      "cashFrozen": "النقد المجمد",
+      "cashSettling": "النقد قيد التسوية",
+      "binanceRestrictedLocation": "حظرت Binance هذه القراءة (HTTP 451): موقع الشبكة الحالي مقيّد. تحقق من توفر Binance في منطقتك واستخدم واجهة API الرسمية المدعومة.",
       "reconnect": "إعادة الاتصال",
       "retryRead": "إعادة محاولة القراءة"
     },
@@ -2324,7 +2333,9 @@
       "accountDefault": " · الافتراضي لدى الوسيط",
       "accountDeactivated": " · معطّل",
       "accountSave": "استخدام هذا الحساب",
-      "accountSaved": "تم حفظ الحساب."
+      "accountSaved": "تم حفظ الحساب.",
+      "host": "المضيف",
+      "port": "المنفذ"
     },
     "imports": {
       "title": "استيراد extraETF Investments",
@@ -2349,7 +2360,8 @@
       "current": "القيمة الحالية",
       "targetValue": "القيمة المستهدفة",
       "change": "تغير القيمة"
-    }
+    },
+    "quoteAsOf": "السعر حتى {{time}}"
   },
   "analysis": {
     "updated": "تم التحديث",

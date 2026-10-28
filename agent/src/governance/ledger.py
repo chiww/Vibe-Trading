@@ -53,6 +53,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Iterable, Iterator, Mapping
@@ -605,10 +606,16 @@ def archive_segments(path: Path) -> list[Path]:
         path: Active ledger path, e.g. ``.../audit_chain.jsonl``.
 
     Returns:
-        Sorted archive paths. Sorting is lexicographic over a zero-padded
-        counter, which is why the counter is padded.
+        Archive paths in numeric counter order, including counters wider than
+        the minimum padding after segment 9999.
     """
-    return sorted(path.parent.glob(f"{path.stem}.[0-9]" + "[0-9]" * (ARCHIVE_SUFFIX_WIDTH - 1) + path.suffix))
+    pattern = re.compile(rf"{re.escape(path.stem)}\.(\d{{{ARCHIVE_SUFFIX_WIDTH},}}){re.escape(path.suffix)}")
+    numbered = []
+    for candidate in path.parent.iterdir() if path.parent.exists() else ():
+        match = pattern.fullmatch(candidate.name)
+        if match:
+            numbered.append((int(match[1]), candidate))
+    return [candidate for _, candidate in sorted(numbered)]
 
 
 def rotate_if_needed(
@@ -635,28 +642,39 @@ def rotate_if_needed(
     Args:
         path: Active ledger path.
         max_bytes: Size at or above which the active file is sealed.
-        fsync: Whether to fsync the directory after the rename.
+        fsync: Whether to fsync the directory after sealing the segment.
 
     Returns:
         The archive path when a rotation happened, else None.
 
     Raises:
         ValueError: If ``max_bytes`` is not positive.
-        LedgerCorruptionError: If the active chain is broken -- a corrupt
-            ledger is sealed by nobody; fix or quarantine it deliberately.
+        LedgerCorruptionError: If the history is broken, sealed segments
+            included -- a corrupt ledger is sealed by nobody; fix or
+            quarantine it deliberately.
     """
     if max_bytes <= 0:
         raise ValueError(f"max_bytes must be positive, got {max_bytes}")
     if not path.exists() or path.stat().st_size < max_bytes:
         return None
 
-    result = verify_chain(path)
+    # The whole history, not just the active file: after an earlier rotation
+    # the active file legitimately starts mid-chain (its first record carries
+    # the sealed segment's seq+1 and prev_record_hash), so a single-file walk
+    # reads that healthy continuation as a seq_gap and would refuse every
+    # rotation after the first.
+    result = verify_chain_with_archives(path)
     if not result.ok:
         raise LedgerCorruptionError(result.first_break)
 
-    counter = len(archive_segments(path)) + 1
+    segments = archive_segments(path)
+    counter = int(segments[-1].stem.rsplit(".", 1)[1]) + 1 if segments else 1
     archive = path.with_name(f"{path.stem}.{counter:0{ARCHIVE_SUFFIX_WIDTH}d}{path.suffix}")
-    path.rename(archive)
+    # link() fails atomically if the destination exists; rename() can replace
+    # a sealed segment on POSIX. A crash between link and unlink retains both
+    # copies and is detected as a duplicate sequence rather than losing data.
+    os.link(path, archive)
+    path.unlink()
     if fsync:
         _fsync_dir(path.parent)
     return archive

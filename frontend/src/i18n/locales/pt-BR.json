@@ -2206,6 +2206,15 @@
       "failed": "Não foi possível ler – não foi contabilizado no total",
       "lastSuccess": "Última leitura bem-sucedida {{time}}",
       "noSuccess": "Nenhuma leitura bem-sucedida ainda",
+      "cashDetails": "Caixa e financiamento",
+      "reportingCurrency": "Moeda do relatório",
+      "financingLimit": "Limite de financiamento",
+      "financingRemaining": "Financiamento restante",
+      "cashAvailable": "Caixa disponível",
+      "cashWithdrawable": "Caixa para saque",
+      "cashFrozen": "Caixa bloqueado",
+      "cashSettling": "Caixa em liquidação",
+      "binanceRestrictedLocation": "A Binance bloqueou esta leitura (HTTP 451): a localização atual da rede é restrita. Verifique a disponibilidade da Binance na sua região e use o endpoint de API compatível.",
       "reconnect": "Reconectar",
       "retryRead": "Tente ler novamente"
     },
@@ -2324,7 +2333,9 @@
       "accountDefault": " · padrão da corretora",
       "accountDeactivated": " · desativada",
       "accountSave": "Usar esta conta",
-      "accountSaved": "Conta salva."
+      "accountSaved": "Conta salva.",
+      "host": "Servidor",
+      "port": "Porta"
     },
     "imports": {
       "title": "Importar extraETF Investments",
@@ -2349,7 +2360,8 @@
       "current": "Valor atual",
       "targetValue": "Valor-alvo",
       "change": "Alteração de valor"
-    }
+    },
+    "quoteAsOf": "Cotação em {{time}}"
   },
   "analysis": {
     "updated": "Atualizado",

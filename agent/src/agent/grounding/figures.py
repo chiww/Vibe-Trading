@@ -73,6 +73,11 @@ _ORDINAL_RE = re.compile(r"(?m)^[^\S\n]*(?:#{1,6}[^\S\n]*)?\d{1,3}[.)、][^\S\n]
 _INDEX_CELL_RE = re.compile(r"\d{1,3}[.)]?")
 _CELL_WORD_RE = re.compile(r"[^\W\d_]{2,}")
 
+# A compact year-horizon label ("1Y", "10y") in a table cell names a column or row, not
+# a measurement. Deliberately narrow: a one-letter "M" stays a magnitude suffix ("5M"),
+# and multi-letter labels ("12mo", "1yr") already read as worded cells.
+_YEAR_HORIZON_CELL_RE = re.compile(r"\d{1,3}[Yy]")
+
 # SHAPE 4 — a CommonMark fence line: at most three spaces of indent, a run of
 # backticks or tildes, and the info string.
 _FENCE_RE = re.compile(r"(?m)^ {0,3}(`{3,}|~{3,})(.*)$")
@@ -399,9 +404,11 @@ _DOTTED_DECIMAL_RE = re.compile(
     r"(?<![\d.,])[+-]?[1-9]\d{0,2}(?:\.\d{3})+,\d+(?!\d|\.\d)"
 )
 
-# A dot-only grouped integer ("5.165", "502.408", "1.234.567") is ambiguous on its
-# own because the same spelling can be a decimal. It is grouping only after the
-# surrounding document has independently established decimal-comma notation.
+# A dot-only grouped integer with a single group ("5.165", "502.408") is ambiguous on
+# its own because the same spelling can be a decimal. It is grouping only after the
+# surrounding document has independently established decimal-comma notation. Two or
+# more groups ("1.234.567") cannot be a decimal in any notation, so they are grouping
+# regardless of the document.
 _DOTTED_GROUPING_RE = re.compile(
     r"(?<![\d.,])[+-]?[1-9]\d{0,2}(?:\.\d{3})+(?![\d.,])"
 )
@@ -449,7 +456,8 @@ def _numbers(text: str, *, decimal_commas: bool | None = None) -> list[_Token]:
             True,
         )
         for match in _DOTTED_GROUPING_RE.finditer(text)
-    ] if comma_decimals else []
+        if comma_decimals or match.group(0).count(".") >= 2
+    ]
     protected = dotted + dotted_grouped
     tokens: list[_Token] = []
     cursor = 0
@@ -1184,7 +1192,10 @@ def scan_figures(content: str, block: FiguresBlock) -> list[Figure]:
         worded = (
             row is not None
             and position not in row.columns
-            and _CELL_WORD_RE.search(row.cells[position][0]) is not None
+            and (
+                _CELL_WORD_RE.search(row.cells[position][0]) is not None
+                or _YEAR_HORIZON_CELL_RE.fullmatch(row.cells[position][0].strip()) is not None
+            )
         )
         if _within((start, digits_end), hard) or (cell is not None and cell[:2] in index_cells):
             shape = "exempt"
