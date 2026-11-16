@@ -272,10 +272,12 @@ def test_benchmark_never_reaches_the_network_for_tdxtap(monkeypatch):
 def test_benchmark_for_an_a_share_basket_is_not_spy():
     """``_infer_market`` 不认识 tdxtap 时，000001.SZ 被判成 us_equity，
     于是一个 A 股回测拿 SPY 当基准。"""
-    from backtest.benchmark import _infer_market, _resolve_ticker
+    from backtest.benchmark import _infer_market, default_benchmark
 
     assert _infer_market(["000001.SZ"], "tdxtap") == "a_share"
-    assert _resolve_ticker(["000001.SZ"], "tdxtap", None) == "000300.SH"
+    assert default_benchmark(["000001.SZ"], "tdxtap") == "000300.SH"
+    # 裸 6 位代码只在 A 股源上才判 a_share；tdxtap 必须在那张源名单里。
+    assert _infer_market(["000001"], "tdxtap") == "a_share"
 
 
 # ── 口径声明要有运行时核对 ───────────────────────────────────────────────
