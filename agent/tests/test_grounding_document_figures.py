@@ -22,7 +22,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from src.agent.grounding import GroundingLedger
+import pytest
+
+from evals.grounding import GroundingLedger
 
 REPORT = """第一节 经营回顾
 
@@ -73,6 +75,34 @@ def _ledger_with_upload(tmp_path: Path) -> tuple[GroundingLedger, Path]:
 
 def _declared(prose: str, *lines: str) -> str:
     return prose + "\n\n```figures\n" + "\n".join(lines) + "\n```"
+
+
+@pytest.mark.parametrize(("source", "valid"), [
+    ("营业收入同比 +17.10%。", True),
+    ("项目 金额 同比（％）\n营业收入 124.20 17.10", True),
+    ("| 项目 | 金额 | 同比 (%) |\n|---|---|---|\n| 营业收入 | 124.20 | 17.10 |", True),
+    ("| 项目 | 金额 | 同比 (%) |\n| 营业收入 | 17.10 | 9.36 |", False),
+    ("项目 金额 同比（％）\n营业收入 17.10", False),
+    ("成品平均重量为 17.10 千克。", False),
+    ("营业收入 7,747,346,892 17.10 20,817,866,218 10.56", False),
+    # A wrapped header drops its (%) marker onto a line of its own, above the
+    # numeric block (real 时代电气 PDF shape, follow-up measured in #2149).
+    ("项目 本报告期\n本报告期比\n上年同期增\n减变动幅度\n(%)\n营业收入 7,747,346,892 17.10", True),
+    ("项目 本报告期\n上年同期\n增减变动\n幅度(%)\n营业收入 7,747,346,892 17.10 6.21", False),
+    ("本报告期\n比上年同期增减\n(%)\n营业收入 7,747,346,892", False),
+    # Prose between the marker line and the numeric block breaks the
+    # association — a wrapped header sits immediately above its block.
+    ("幅度\n(%)\n管理层讨论与分析如下。\n营业收入 7,747,346,892 17.10", False),
+])
+def test_percent_declaration_needs_a_unit_in_its_own_document(tmp_path, source, valid):
+    ledger, document = _ledger_with_upload(tmp_path)
+    _read_document(ledger, document, "doc-1", source)
+    _read_document(ledger, document.with_name("other.pdf"), "doc-2", "占比 17.10%。")
+    for declaration in ("17.10", "17.10%"):
+        result = ledger.validate_final_answer(_declared(
+            "营收同比增长 +17.10%。", f"{declaration} | observed | 营收同比 | doc-1",
+        ))
+        assert result.valid is valid, result.issues
 
 
 def test_a_document_figure_grounds_the_answer_that_quotes_it(tmp_path: Path) -> None:
@@ -165,3 +195,212 @@ def test_an_error_envelope_records_nothing(tmp_path: Path) -> None:
     )
 
     assert not result.valid
+
+
+@pytest.mark.parametrize("ref", ["doc-1", "read_document", "ar2025.pdf", "doc-1::document.figure"])
+@pytest.mark.parametrize(
+    ("value", "written"),
+    [("763,154,445.01", "763,154,445.01 元"), ("191,586,814.48", "1.92亿元")],
+)
+def test_document_table_amount_can_be_restated_with_a_unit(
+    tmp_path: Path, ref: str, value: str, written: str,
+) -> None:
+    ledger, document = _ledger_with_upload(tmp_path)
+    _read_document(ledger, document, "doc-1", f"单位：元\n| 项目 | 金额 |\n| 营业收入 | {value} |")
+    result = ledger.validate_final_answer(
+        _declared(f"营业收入为 {written}。", f"{written} | observed | 营业收入 | {ref}")
+    )
+    assert result.valid, result.issues
+
+
+@pytest.mark.parametrize("written", ["863,154,445.01 元", "763,154,445.01 USD", "763,154,445.01%"])
+def test_document_unit_restatement_does_not_invent_value_currency_or_ratio(
+    tmp_path: Path, written: str,
+) -> None:
+    ledger, document = _ledger_with_upload(tmp_path)
+    _read_document(ledger, document, "doc-1", "| 营业收入 | 763,154,445.01 |")
+    result = ledger.validate_final_answer(
+        _declared(f"营业收入为 {written}。", f"{written} | observed | 营业收入 | doc-1")
+    )
+    assert not result.valid
+
+
+def test_document_unit_restatement_keeps_exact_source_binding(tmp_path: Path) -> None:
+    ledger, document = _ledger_with_upload(tmp_path)
+    _read_document(ledger, document, "doc-1", "| 营业收入 | 763,154,445.01 |")
+    _read_document(ledger, document.with_name("other.pdf"), "doc-2", "| 营业收入 | 863,154,445.01 |")
+    result = ledger.validate_final_answer(
+        _declared("营业收入为 863,154,445.01 元。", "863,154,445.01 元 | observed | 营业收入 | doc-1")
+    )
+    assert not result.valid
+
+
+@pytest.mark.parametrize("formula", ["39.66% - 38.96%", "39.66 - 38.96"])
+def test_document_percentage_points_can_be_declared_as_written(tmp_path: Path, formula: str) -> None:
+    ledger, document = _ledger_with_upload(tmp_path)
+    _read_document(ledger, document, "doc-1", "毛利率分别为 39.66% 和 38.96%。")
+    result = ledger.validate_final_answer(
+        _declared("毛利率上升 0.70个百分点。", f"0.70个百分点 | derived | {formula} | doc-1")
+    )
+    assert result.valid, result.issues
+
+
+def test_document_percentage_point_derivation_still_needs_both_operands(tmp_path: Path) -> None:
+    ledger, document = _ledger_with_upload(tmp_path)
+    _read_document(ledger, document, "doc-1", "毛利率为 39.66%。")
+    result = ledger.validate_final_answer(
+        _declared("毛利率上升 0.70个百分点。", "0.70个百分点 | derived | 39.66% - 38.96% | doc-1")
+    )
+    assert not result.valid
+
+
+def test_money_can_be_derived_from_explicitly_referenced_document_cells(tmp_path: Path) -> None:
+    ledger, document = _ledger_with_upload(tmp_path)
+    _read_document(ledger, document, "doc-1", "| 本期 | 上期 |\n| 763,154,445.01 | 663,154,445.01 |")
+    result = ledger.validate_final_answer(
+        _declared("营业收入增加 1.00亿元。", "1.00亿元 | derived | 763154445.01 - 663154445.01 | doc-1")
+    )
+    assert result.valid, result.issues
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "North segment 154,700 165,200 6.79%",
+        "North segment 165,200",
+        "| Segment | Amount |\n| North | 165,200 |",
+    ],
+)
+def test_document_grouped_integer_grounds_a_quoted_table_cell(
+    tmp_path: Path,
+    text: str,
+) -> None:
+    ledger, document = _ledger_with_upload(tmp_path)
+    _read_document(ledger, document, "doc-1", text)
+
+    result = ledger.validate_final_answer(
+        _declared(
+            "| Segment | Amount |\n|---|---|\n| North | 165,200 |",
+            "165,200 | observed | North segment | doc-1",
+        )
+    )
+
+    assert result.valid, result.issues
+
+
+@pytest.mark.parametrize("value", ["265,200", "2025.00", "3400"])
+def test_document_integer_claims_still_need_matching_observed_evidence(
+    tmp_path: Path,
+    value: str,
+) -> None:
+    ledger, document = _ledger_with_upload(tmp_path)
+    _read_document(
+        ledger,
+        document,
+        "doc-1",
+        "Report year 2025. Staff 3400. North segment 165,200.",
+    )
+
+    result = ledger.validate_final_answer(
+        _declared(
+            f"| Item | Amount |\n|---|---|\n| North | {value} |",
+            f"{value} | observed | North segment | doc-1",
+        )
+    )
+
+    assert not result.valid
+
+
+def test_document_grouped_integer_keeps_the_referenced_source(tmp_path: Path) -> None:
+    ledger, document = _ledger_with_upload(tmp_path)
+    _read_document(ledger, document, "doc-1", "North segment 165,200")
+    _read_document(
+        ledger,
+        document.with_name("other.pdf"),
+        "doc-2",
+        "North segment 265,200",
+    )
+
+    result = ledger.validate_final_answer(
+        _declared(
+            "| Segment | Amount |\n|---|---|\n| North | 265,200 |",
+            "265,200 | observed | North segment | doc-1",
+        )
+    )
+
+    assert not result.valid
+
+
+@pytest.mark.parametrize("inside_run", [False, True])
+def test_document_grouped_integer_cannot_launder_generated_artifacts(
+    tmp_path: Path,
+    inside_run: bool,
+) -> None:
+    ledger, document = _ledger_with_upload(tmp_path)
+    if inside_run:
+        document = ledger.run_dir / "report.md"
+    else:
+        ledger.ingest_tool_result(
+            tool_name="write_file",
+            arguments={"path": str(document)},
+            result=json.dumps({"status": "ok", "path": str(document)}),
+            call_id="model-write-doc",
+            success=True,
+        )
+    _read_document(ledger, document, "doc-1", "North segment 165,200")
+
+    result = ledger.validate_final_answer(
+        _declared(
+            "| Segment | Amount |\n|---|---|\n| North | 165,200 |",
+            "165,200 | observed | North segment | doc-1",
+        )
+    )
+
+    assert not result.valid
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "股东总数 76175",
+        "| 指标 | 数值 |\n|---|---|\n| 股东总数 | 76175 |",
+    ],
+)
+def test_large_bare_integer_grounds_a_quoted_table_cell(
+    tmp_path: Path,
+    text: str,
+) -> None:
+    """An explicitly quoted integer keeps its source label and exact call."""
+    ledger, document = _ledger_with_upload(tmp_path)
+    _read_document(ledger, document, "doc-1", text)
+
+    result = ledger.validate_final_answer(
+        _declared(
+            "| 指标 | 数值 |\n|---|---|\n| 股东总数 | 76,175 |",
+            "76,175 | observed | quote: 股东总数 76175 | doc-1",
+        )
+    )
+
+    assert result.valid, result.issues
+
+
+def test_four_digit_bare_integer_stays_layout(tmp_path: Path) -> None:
+    """A headcount of 3400 has no mark of measurement and is not large enough
+    to rule out a coincidence match, so it never becomes evidence."""
+    ledger, document = _ledger_with_upload(tmp_path)
+    _read_document(ledger, document, "doc-1", "员工总数 3400 人")
+
+    values = {record.value for record in ledger._evidence}
+
+    assert 3400 not in values, "四位数裸整数不该进账本"
+
+
+def test_year_still_never_enters_the_ledger(tmp_path: Path) -> None:
+    """2026 and 2025 stay years, not findings, even though a date row reads
+    five digits when the run parses it."""
+    ledger, document = _ledger_with_upload(tmp_path)
+    _read_document(ledger, document, "doc-1", "报告期 2026 年，上市年份 2015 年。")
+
+    values = {record.value for record in ledger._evidence}
+
+    assert 2026 not in values and 2015 not in values, "年份进了账本"

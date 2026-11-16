@@ -28,7 +28,6 @@ if str(AGENT_DIR) not in sys.path:
 #     i.e. during collection): loop.RUNS_DIR/SESSIONS_DIR, goal/session
 #     _DB_PATH, helpers.ENV_PATH, memory MEMORY_BASE, skills USER_SKILLS_DIR,
 #     strategy_store _DEFAULT_DB_PATH, swarm presets USER_PRESETS_DIR,
-#     qveris QVERIS_CONFIG_PATH.
 #   * Runtime Path.home() call sites: redaction's internal-root anchors
 #     (_internal_roots_for_cwd), alpha_bench report output (_default_output_dir),
 #     autopilot run dirs, uploads shadow_reports.
@@ -201,3 +200,18 @@ def _reset_env_config():
     os.environ.clear()
     os.environ.update(saved_environ)
     reset_env_config()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_data_gateway(tmp_path, monkeypatch):
+    """Keep each test's source patches and snapshots out of other tests."""
+    import src.data_gateway as gateway_module
+
+    prior = gateway_module._instance
+    monkeypatch.setattr(gateway_module, "_instance", None)
+    monkeypatch.setenv("VIBE_GATEWAY_CACHE_DIR", str(tmp_path / "gateway-cache"))
+    yield
+    instance = gateway_module._instance
+    if instance is not None and instance is not prior:
+        instance.close()
+        atexit.unregister(instance.close)

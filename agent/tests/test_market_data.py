@@ -64,7 +64,8 @@ from src.market_data import (
         ("^SPX", "yahoo"),  # index (S&P 500)
         ("^FTSE", "yahoo"),  # index (FTSE 100)
         ("^VIX", "yahoo"),
-        ("something_weird", "tushare"),  # documented fallback
+        ("7203.T", "yahoo"),
+        ("130A.T", "yahoo"),
     ],
 )
 def test_detect_source(code: str, expected: str) -> None:
@@ -80,7 +81,7 @@ def test_yahoo_loader_accepts_futures_and_forex_suffixes() -> None:
     assert _is_supported("AAPL.US") is True  # unchanged
     assert _is_supported("TD.TO") is True
     assert _is_supported("PNG.V") is True
-    assert _is_supported("600519.SH") is False  # A-share still not yahoo
+    assert _is_supported("600519.SH") is True  # CNY-checked mainland fallback
 
 
 def test_yahoo_loader_accepts_index_symbols() -> None:
@@ -150,7 +151,7 @@ def test_yahoo_loader_accepts_futures_and_forex_suffixes() -> None:
     assert _is_supported("AAPL.US") is True  # unchanged
     assert _is_supported("TD.TO") is True
     assert _is_supported("PNG.V") is True
-    assert _is_supported("600519.SH") is False  # A-share still not yahoo
+    assert _is_supported("600519.SH") is True  # CNY-checked mainland fallback
 
 
 def test_fetch_market_data_auto_routes_yahoo_suffix_symbols() -> None:
@@ -865,3 +866,27 @@ def test_fetch_auto_full_batch_never_touches_the_next_source() -> None:
     )
     assert stooq_calls == []
     assert "AAPL.US" in out and "NVDA.US" in out
+
+@pytest.mark.parametrize("symbol", ["600519.SH", "00700.HK", "000300.SH"])
+def test_missing_market_quotes_never_cross_the_gildata_boundary(symbol, monkeypatch):
+    from backtest.loaders.base import NoAvailableSourceError
+
+    monkeypatch.setenv("GILDATA_TOKEN", "existing-token")
+    monkeypatch.setenv("VIBE_TRADING_GILDATA_FEATURES", "market_quotes")
+    attempts = []
+
+    def unavailable(name):
+        attempts.append(name)
+        raise NoAvailableSourceError(name)
+
+    def query(source):
+        return fetch_market_data(
+            codes=[symbol], source=source, start_date="2024-01-01",
+            end_date="2024-01-05", loader_resolver=unavailable, max_fallback_attempts=100,
+        )
+
+    assert query("auto")["_unresolved"] == [symbol]
+    assert attempts and "gildata" not in attempts
+    attempts.clear()
+    assert query("gildata")["_unresolved"] == [symbol]
+    assert attempts == ["gildata"]

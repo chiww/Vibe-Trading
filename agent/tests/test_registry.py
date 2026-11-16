@@ -203,6 +203,7 @@ class TestFallbackChains:
             "hk_equity",
             "india_equity",
             "kr_equity",
+            "jp_equity",
             "ca_equity",
             "ar_equity",
             "br_equity",
@@ -256,9 +257,9 @@ class TestFallbackChains:
             "tencent",
             "eastmoney",
             "baostock",
+            "yahoo",
             "akshare",
             "tushare",
-            "gildata",
             "local",
         ]
         assert FALLBACK_CHAINS["us_equity"] == [
@@ -284,7 +285,6 @@ class TestFallbackChains:
             "yfinance",
             "tushare",
             "longbridge",
-            "gildata",
             "local",
         ]
 

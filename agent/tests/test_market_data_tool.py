@@ -95,6 +95,8 @@ def test_market_data_json_can_include_actual_source_provenance():
         "currency_conversion": "none",
         "volume_unit": None,
         "adjustment": "split_dividend",
+        "quote_currency": "USD",
+        "quote_currency_basis": "instrument_market_contract",
     }
 
 
@@ -301,7 +303,8 @@ def test_worker_prompt_prioritizes_get_market_data_for_ohlcv():
     prompt = build_worker_prompt(spec, {}, "  - yfinance: market data")
 
     assert "Market Data Tool Policy" in prompt
-    assert "call `get_market_data` before writing raw provider scripts" in prompt
+    assert "get_market_data for bars" in prompt
+    assert "raw yfinance scripts only" not in prompt
 
 
 def test_market_data_tool_rejects_empty_codes():
@@ -375,7 +378,7 @@ def test_market_data_tool_accepts_every_registered_source():
     """Every source in the loader registry must pass MarketDataTool validation.
 
     Regression (#1185): the source allow-list was a hardcoded subset that
-    rejected registered, documented sources (binance, local, futu, qveris,
+    rejected registered, documented sources (binance, local, futu,
     india_broker, tickerall). The tool's enum must match VALID_SOURCES so the
     tool can never silently drop a loader the registry serves.
     """

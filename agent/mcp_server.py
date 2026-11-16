@@ -6,7 +6,7 @@ Zero API key required for HK/US/crypto research markets (yfinance, OKX,
 AKShare are free). Trading connector tools are profile-scoped and require the
 selected connector's own local app or OAuth setup.
 
-Surfaces 82 tools: skills, research goals, strategy discovery,
+Surfaces 81 tools: skills, research goals, strategy discovery,
 backtest/factor/options/pattern
 analysis, deterministic paper-trading matching (paper_trade_step), market data, fundamentals & capital-flow & news & discovery
 (get_fund_flow / get_dragon_tiger / get_northbound_flow / get_southbound_flow /
@@ -14,8 +14,7 @@ get_margin_trading /
 get_block_trades / get_shareholder_count / get_lockup_expiry / get_sector_info /
 get_research_reports / get_stock_news / get_sec_filings /
 get_financial_statements / get_options_chain / get_stock_profile /
-screen_market / search_symbol / get_macro_series / iwencai_search /
-qveris_search / qveris_inspect / qveris_execute),
+screen_market / search_symbol / get_macro_series / iwencai_search),
 institutional-research and alternative data (get_institutional_holdings /
 etf_holdings / prediction_market / research_papers), read-only finance math and
 market analytics (quantlib_call / cashflow_performance / orderbook_depth /
@@ -24,9 +23,7 @@ trading-connector reads, swarm orchestration, trade-journal and shadow-account
 analysis. Every exposed tool is read-only or research-only except
 refresh_strategy_evidence, which writes ONLY the disposable facade-owned
 strategy-evidence cache from local run artifacts; no order-placing or
-order-cancelling tool is ever surfaced via MCP. The QVeris tools additionally
-require QVeris paid routing (QVERIS_API_KEY + paid mode), and qveris_execute
-is billable research-data execution only — it never places orders.
+order-cancelling tool is ever surfaced via MCP.
 
 Usage:
     python mcp_server.py                    # stdio transport (default)
@@ -73,6 +70,8 @@ if str(AGENT_DIR) not in sys.path:
     sys.path.insert(0, str(AGENT_DIR))
 
 from fastmcp import Context, FastMCP
+from fastmcp.exceptions import ToolError
+from fastmcp.server.middleware import Middleware
 from pydantic import BeforeValidator
 
 from cli._version import __version__ as APP_VERSION
@@ -82,10 +81,38 @@ from src.market_data import (
     detect_source,
     get_loader,
 )
+from src.factors.research_contract import RESEARCH_MODES, RESEARCH_STAGES
 
 mcp = FastMCP("Vibe-Trading", version=APP_VERSION)
 
 logger = logging.getLogger(__name__)
+
+
+class _ToolPolicyMiddleware(Middleware):
+    """Apply the tool deny-list to every MCP tool.
+
+    The registry refuses denied names, but many MCP tools call their code
+    directly; screening here covers those and keeps denied tools out of the
+    advertised list. Like the registry check, a convenience filter, not a
+    security boundary.
+    """
+
+    async def on_list_tools(self, context: Any, call_next: Any) -> Any:
+        from src.providers.tool_policy import _deny_prefixes
+
+        prefixes = _deny_prefixes()
+        return [tool for tool in await call_next(context) if not tool.name.startswith(prefixes)]
+
+    async def on_call_tool(self, context: Any, call_next: Any) -> Any:
+        from src.providers.tool_policy import _deny_prefixes
+
+        name = context.message.name
+        if name.startswith(_deny_prefixes()):
+            raise ToolError(f"{name} is disabled by the active tool policy")
+        return await call_next(context)
+
+
+mcp.add_middleware(_ToolPolicyMiddleware())
 
 
 # ---------------------------------------------------------------------------
@@ -729,6 +756,36 @@ def add_goal_evidence(
 
 
 @mcp.tool
+def update_research_goal(
+    objective: str | None = None,
+    ui_summary: str | None = None,
+    goal_id: str = "",
+    expected_goal_id: str = "",
+    session_id: str = "",
+    ctx: Context | None = None,
+) -> str:
+    """Edit the current research goal without discarding criteria or evidence.
+
+    Args:
+        objective: Replacement objective; omit to keep the current text.
+        ui_summary: Replacement display summary; omit to keep it.
+        goal_id: Optional current goal id.
+        expected_goal_id: Optional stale-write guard, defaulting to goal_id.
+        session_id: Optional conversation id; defaults to this MCP connection.
+        ctx: MCP request context supplied by the server.
+
+    Returns:
+        Updated snapshot or a structured validation/stale-goal error.
+    """
+    from src.tools.goal_tool import UpdateResearchGoalTool
+
+    return UpdateResearchGoalTool(
+        default_session_id=_resolve_session_id(session_id, ctx), store=_get_goal_store()
+    ).execute(objective=objective, ui_summary=ui_summary, goal_id=goal_id,
+              expected_goal_id=expected_goal_id)
+
+
+@mcp.tool
 def update_research_goal_status(
     status: str,
     goal_id: str = "",
@@ -824,7 +881,7 @@ def backtest(run_dir: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Paper-trading step tool (pt-v1.1, hand-written wrapper)
+# Paper-trading step tool (pt-v1.1/pt-v1.2/pt-v1.3, VD-12 hand-written wrapper)
 # ---------------------------------------------------------------------------
 
 
@@ -838,14 +895,19 @@ def paper_trade_step(
     orders: _lenient_dict_list_opt = None,
     strategy_path: str | None = None,
     fee_model: _lenient_dict_any_opt = None,
+    interval: str | None = None,
+    session: str | None = None,
+    path_model: str | None = None,
+    fill_model: str | None = None,
+    order_volume_ratio: float | None = None,
 ) -> str:
     """Run one step of the deterministic paper-trading matching engine; never places real orders.
 
-    Matches the injected ``orders`` (or a ``strategy_path``'s per-day orders)
-    against daily bars under the market's frozen rules (T+1, price limits,
-    board lots, fees) and returns ONE in-band JSON document on
-    ``result.content[0].text``: the pt-v1.1 success result, or an error
-    envelope (``PAPER_DATA_NOT_READY`` retryable / ``INVALID_REQUEST``
+    Matches the injected ``orders`` (or, in Step 7, a ``strategy_path``'s
+    per-day orders) against bars under the market's frozen rules (T+1, price
+    limits, board lots, fees) and returns ONE in-band JSON document on
+    ``result.content[0].text``: the pt-v1.1/pt-v1.2/pt-v1.3 success result, or an AM-5
+    error envelope (``PAPER_DATA_NOT_READY`` retryable / ``INVALID_REQUEST``
     non-retryable) on the SAME channel — never a transport error. Research-only:
     it reads market data and the injected ledger, matches on paper, and writes
     nothing; no broker or trading-connector order path exists here.
@@ -866,7 +928,18 @@ def paper_trade_step(
             per-day orders are matched. Exactly one of ``orders`` /
             ``strategy_path``.
         fee_model: Optional per-key fee overrides merged over the market
-            defaults.
+            defaults (AM-4-3: RM always injects it explicitly).
+        interval: Optional pt-v1.2 bar interval — ``1d`` (default) or ``5m``;
+            ``5m`` is cn_a-only.
+        session: Optional pt-v1.2 session selector — ``auto`` (default) or
+            ``cn_a``; ``cn_a`` requires market ``cn_a``.
+        path_model: Optional pt-v1.2 reference-price model — ``bar_median``
+            (default) or ``bar_close``; ignored for ``1d``.
+        fill_model: Optional fill model — ``all_or_none`` (default) or
+            ``volume_share`` (pt-v1.3; requires ``interval='5m'`` and cn_a).
+        order_volume_ratio: Optional pt-v1.3 per-order share of available
+            volume, ``0 < r <= 1``; only with ``fill_model='volume_share'``.
+            Omitted means 1.0.
     """
     from src.tools.paper_trade.tool import run_paper_trade_step
 
@@ -883,7 +956,36 @@ def paper_trade_step(
         payload["strategy_path"] = strategy_path
     if fee_model is not None:
         payload["fee_model"] = fee_model
+    if interval is not None:
+        payload["interval"] = interval
+    if session is not None:
+        payload["session"] = session
+    if path_model is not None:
+        payload["path_model"] = path_model
+    if fill_model is not None:
+        payload["fill_model"] = fill_model
+    if order_volume_ratio is not None:
+        payload["order_volume_ratio"] = order_volume_ratio
     return run_paper_trade_step(payload)
+
+
+@mcp.tool
+def paper_trade_reconcile(account_state: _lenient_dict_any, result: _lenient_dict_any) -> str:
+    """Independently reconcile a paper-trading result without market or broker access.
+
+    Replays the supplied fills from the initial ledger and checks fees, cash,
+    positions, cn_a T+1 availability, end_state and NAV arithmetic. The report
+    distinguishes verified ledger facts from market-value and hash checks that
+    the result alone cannot establish. Research only; no orders are placed.
+
+    Args:
+        account_state: Initial ``{cash, positions}`` ledger supplied to the step.
+        result: Successful ``paper_trade_step`` document to audit.
+    """
+    registry = _get_registry()
+    return registry.execute(
+        "paper_trade_reconcile", {"account_state": account_state, "result": result}
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -962,6 +1064,8 @@ def alpha_bench(
     top: int = 20,
     horizon: int = 1,
     output_dir: str | None = None,
+    research_stage: str = "single_factor_evaluation",
+    research_mode: str = "explore",
 ) -> str:
     """Benchmark one Alpha Zoo alpha or a complete zoo on a universe.
 
@@ -976,6 +1080,8 @@ def alpha_bench(
             non-overlapping (end-anchored); 21 ≈ monthly, the conventional
             horizon for fundamental factors. Range 1-252.
         output_dir: Optional directory for the generated HTML report.
+        research_stage: Stage recorded in the factor-research contract.
+        research_mode: Declared mode; metadata only, not locked-evaluation enforcement.
     """
     if not alpha_id and not zoo:
         return json.dumps(
@@ -1035,6 +1141,15 @@ def alpha_bench(
             ensure_ascii=False,
         )
 
+    if research_stage not in RESEARCH_STAGES or research_mode not in RESEARCH_MODES:
+        return json.dumps(
+            {
+                "status": "error",
+                "error": "MCP alpha_bench research_stage or research_mode is not supported",
+            },
+            ensure_ascii=False,
+        )
+
     params: dict[str, Any] = {
         "universe": universe,
         "period": period,
@@ -1045,6 +1160,12 @@ def alpha_bench(
         params["alpha_id"] = alpha_id
     if zoo is not None:
         params["zoo"] = zoo
+    # Keep the legacy wire payload byte-for-byte stable when callers use the
+    # default stage; newer clients can opt into the additive research contract.
+    if research_stage != "single_factor_evaluation":
+        params["research_stage"] = research_stage
+    if research_mode != "explore":
+        params["research_mode"] = research_mode
 
     if output_dir:
         from src.config.paths import get_runtime_root
@@ -1122,6 +1243,11 @@ def analyze_options_payoff(
     spot_max: float | None = None,
     spot_points: int = 121,
     scenario_iv_values: _lenient_float_list_opt = None,
+    underlying_qty: float = 0.0,
+    price_as_of: str | None = None,
+    expiry_spot_values: _lenient_float_list_opt = None,
+    label: str = "base",
+    alternatives: _lenient_dict_list_opt = None,
 ) -> str:
     """Analyze a multi-leg option strategy's payoff and spot/IV scenarios.
 
@@ -1131,6 +1257,9 @@ def analyze_options_payoff(
     Research only; this tool cannot place orders.
 
     Args:
+        label: Name of the base strategy.
+        alternatives: Named {label, legs} strategies on shared pricing assumptions;
+            returns their calculations and cap/floor/cost comparisons in this call.
         legs: Option leg objects with ``option_type`` (call/put), positive
             ``strike``, signed integer ``qty``, and optional per-share
             ``premium``. Positive quantity is long; negative is short.
@@ -1138,6 +1267,9 @@ def analyze_options_payoff(
         expiry_days: Non-negative calendar days to expiry.
         risk_free_rate: Annual continuously compounded risk-free rate.
         volatility: Annualized entry volatility, e.g. 0.3 for 30%.
+        underlying_qty: Signed stock units per multiplier, 1 for a covered collar.
+        price_as_of: Observation date for the entry price.
+        expiry_spot_values: Exact non-negative expiry scenario prices for P&L and returns.
         multiplier: Currency multiplier per option price unit.
         commission_rate: Entry commission fraction, aligned with the options
             backtest engine.
@@ -1149,14 +1281,20 @@ def analyze_options_payoff(
     """
     params: dict[str, Any] = {
         "legs": legs,
+        "label": label,
+        "alternatives": alternatives or [],
         "entry_spot": entry_spot,
         "expiry_days": expiry_days,
         "risk_free_rate": risk_free_rate,
         "volatility": volatility,
         "multiplier": multiplier,
+        "underlying_qty": underlying_qty,
+        "price_as_of": price_as_of,
         "commission_rate": commission_rate,
         "spot_points": spot_points,
     }
+    if expiry_spot_values is not None:
+        params["expiry_spot_values"] = expiry_spot_values
     if spot_min is not None:
         params["spot_min"] = spot_min
     if spot_max is not None:
@@ -1228,7 +1366,7 @@ def read_document(file_path: str) -> str:
 
 @mcp.tool
 def web_search(query: str, max_results: int = 5) -> str:
-    """Search the web via DuckDuckGo and return top results.
+    """Search the web with configured providers and free search engines.
 
     Returns titles, URLs, and snippets. Use read_url() to fetch full content
     from any result URL. Free, no API key required.
@@ -1334,6 +1472,25 @@ def read_run_artifact(
             "max_rows": max_rows,
             "columns": columns,
         },
+    )
+
+
+@mcp.tool
+def list_backtest_runs(scope: str = "all", run_id: str = "", limit: int = 5, offset: int = 0) -> str:
+    """List earlier backtest runs (newest first, paged) so their artifacts can be read, not re-run.
+
+    Each run carries the absolute ``run_dir`` of its backtests for ``read_run_artifact``.
+    Without an active session, ``scope="session"`` also lists every run.
+
+    Args:
+        scope: "all" (default) or "session".
+        run_id: Only this bare run directory name.
+        limit: Runs per page [1, 20] (default 5).
+        offset: Runs to skip; use ``next_offset`` from the previous page.
+    """
+    registry = _get_registry()
+    return registry.execute(
+        "list_backtest_runs", {"scope": scope, "run_id": run_id or None, "limit": limit, "offset": offset}
     )
 
 
@@ -1928,6 +2085,9 @@ def _get_loader(source: str):
     return get_loader(source)
 
 
+_get_loader.gateway_default_resolver = True
+
+
 def _cap_rows(records: list, max_rows: int) -> list | dict[str, object]:
     """Bound a per-symbol row list to keep the MCP payload within budget.
 
@@ -1942,6 +2102,12 @@ def _cap_rows(records: list, max_rows: int) -> list | dict[str, object]:
     return cap_rows(records, max_rows)
 
 
+def _calculation_workspace() -> str:
+    """Use the normal runtime run root for MCP observations and calculations."""
+    from src.config.paths import get_runs_dir
+    return str(get_runs_dir() / "mcp-calculations")
+
+
 @mcp.tool
 def get_market_data(
     codes: _lenient_str_list,
@@ -1950,6 +2116,9 @@ def get_market_data(
     source: str = "auto",
     interval: str = "1D",
     max_rows: int = DEFAULT_MAX_ROWS,
+    run_dir: str | None = None,
+    export_csv: bool = True,
+    warmup_start_date: str | None = None,
 ) -> str:
     """Fetch OHLCV market data for stocks, crypto, or mixed symbols.
 
@@ -1963,9 +2132,15 @@ def get_market_data(
     - "akshare": A-shares, US, HK, futures, forex (free, e.g. 000001.SZ, AAPL.US)
     - "ccxt": crypto from 100+ exchanges (free, e.g. BTC/USDT)
     - "mt5": forex/metals from a local MetaTrader 5 terminal (Windows; e.g. EUR/USD, XAUUSD.FX)
+    - "gildata": only on user request, with token and market quotes enabled; no fallback
     - "auto": auto-detect based on symbol format (with fallback)
 
     Args:
+        run_dir: Calculation workspace; defaults to runtime runs/mcp-calculations and returns a full result reference.
+        export_csv: Save a CSV by default from the same returned rows, with provenance,
+            sampling flags, columns, row count and checksum. No extra fetch.
+        warmup_start_date: Optional calculation-history start before start_date.
+            Returned rows include this prefix; start_date remains the analysis start.
         codes: List of symbols (e.g. ["AAPL.US", "TD.TO", "BTC-USDT", "000001.SZ"]).
         start_date: Start date (YYYY-MM-DD).
         end_date: End date (YYYY-MM-DD).
@@ -2003,6 +2178,9 @@ def get_market_data(
             "source": source,
             "interval": interval,
             "max_rows": max_rows,
+            "run_dir": run_dir or _calculation_workspace(),
+            "export_csv": export_csv,
+            "warmup_start_date": warmup_start_date,
             # Internal hook, not an agent-facing parameter: keeps the MCP
             # surface resolving loaders through mcp_server._get_loader (the
             # contract the regression tests and the server's own loader
@@ -2018,12 +2196,11 @@ def get_market_data(
 # Each wrapper delegates to the auto-discovered local registry, exactly like
 # factor_analysis / pattern_recognition above. The registry returns a clean
 # JSON error envelope when a key-gated tool (get_macro_series needs
-# FRED_API_KEY, iwencai_search needs VIBE_TRADING_IWENCAI_KEY, the qveris_*
-# tools need QVeris paid routing: QVERIS_API_KEY + paid mode) is absent — see
+# FRED_API_KEY, iwencai_search needs VIBE_TRADING_IWENCAI_KEY) is absent — see
 # ``_execute_key_gated`` below, which honours that contract even though the
 # tool is excluded from the registry by ``check_available()``. Every tool below
 # is read-only or research-only data — no order/trading tool is ever surfaced
-# via MCP (qveris_execute spends QVeris credits on data calls, never orders).
+# via MCP.
 # ---------------------------------------------------------------------------
 
 
@@ -2034,7 +2211,6 @@ def get_market_data(
 # contract above (a clean, env-var-named error). For these tools we therefore
 # fall through to the tool's own ``execute()`` — whose missing-key envelope
 # names the exact env var (``FRED_API_KEY`` / ``VIBE_TRADING_IWENCAI_KEY``),
-# or the missing QVeris paid-routing setup (``QVERIS_API_KEY`` + paid mode).
 def _key_gated_tool_classes() -> dict[str, Any]:
     """Return the {tool_name: tool_class} map for key-gated MCP tools.
 
@@ -2052,11 +2228,6 @@ def _key_gated_tool_classes() -> dict[str, Any]:
         SearchBrokerReportsTool,
     )
     from src.tools.iwencai_tool import IWenCaiSearchTool
-    from src.tools.qveris_tool import (
-        QVerisExecuteTool,
-        QVerisInspectTool,
-        QVerisSearchTool,
-    )
 
     return {
         "get_macro_series": FredMacroTool,
@@ -2065,25 +2236,16 @@ def _key_gated_tool_classes() -> dict[str, Any]:
         "get_cn_announcements": GetCnAnnouncementsTool,
         "search_broker_reports": SearchBrokerReportsTool,
         "iwencai_search": IWenCaiSearchTool,
-        "qveris_search": QVerisSearchTool,
-        "qveris_inspect": QVerisInspectTool,
-        "qveris_execute": QVerisExecuteTool,
     }
 
 
 def _execute_key_gated(name: str, params: dict[str, Any]) -> str:
     """Run a key-gated MCP tool, preserving its env-var-named error.
 
-    Prefers the auto-discovered registry (present when the API key is set and,
-    for the qveris_* tools, paid mode is on). When the gating is absent the
-    tool is excluded from the registry, so we invoke its concrete ``execute()``
-    directly to surface the documented missing-key error that names the exact
-    env var — or the missing QVeris paid routing — never a generic "Tool not
-    found".
+    If a credential is missing, use the tool's own actionable error response.
 
     Args:
-        name: MCP tool name (``get_macro_series``, ``iwencai_search``,
-            ``qveris_search``, ``qveris_inspect`` or ``qveris_execute``).
+        name: Registered key-gated tool name.
         params: Keyword arguments forwarded to the tool.
 
     Returns:
@@ -2377,23 +2539,48 @@ def get_financial_statements(code: str, statement: str = "indicators", period: s
 
 
 @mcp.tool
-def get_options_chain(ticker: str, expiration: int | None = None) -> str:
+def get_options_chain(ticker: str, expiration: int | None = None, offset: int | None = None, near_spot_count: int | None = None) -> str:
     """Fetch the US-listed options chain (calls and puts) for one expiration.
 
     Returns per-contract strike, bid/ask, last price, volume, open interest,
     implied volatility, and in-the-money flag, plus the list of available
-    expirations (epoch seconds) via Yahoo Finance. Read-only US options data.
+    expirations (epoch seconds) via the shared data gateway. Read-only US options data.
 
     Args:
         ticker: US underlying symbol (e.g. "AAPL" or "AAPL.US").
         expiration: Optional expiration as Unix epoch seconds (one of the
             returned expirations). Omit for the nearest expiration.
+        offset: Optional strike-order page offset, 60 rows per side; omit for near-spot contracts.
+        near_spot_count: Optional nearest strikes per side (1..60), incompatible with offset.
     """
     params: dict[str, Any] = {"ticker": ticker}
     if expiration is not None:
         params["expiration"] = expiration
+    if offset is not None:
+        params["offset"] = offset
+    if near_spot_count is not None:
+        params["near_spot_count"] = near_spot_count
     registry = _get_registry()
     return registry.execute("get_options_chain", params)
+
+
+@mcp.tool
+def history_data(action: str, job: str | None = None, codes: list[str] | None = None,
+                 start_date: str | None = None, end_date: str | None = None,
+                 interval: str = "5m", offset: int = 0, source: str = "auto") -> str:
+    """Plan/resume quota-bounded routed historical datasets; read unsampled pages.
+
+    Actions: plan, create, start, status, rows, cancel, pin, unpin, delete,
+    storage, prune, scan_create, scan_status, scan_cancel. Scans are process-local
+    background acquisitions; specify interval="1D" for daily scans. Plan/create require codes and settled ISO dates. Other
+    job operations require the returned job id. Source defaults to auto; explicit source pins a provider.
+    Rows are never sampled; coverage_verified distinguishes verified from downloaded/unverified data.
+    Row pages retain per-symbol currency, units, timezone and source provenance; null fields remain unknown.
+    """
+    return _get_registry().execute("history_data", {
+        "action": action, "job": job, "codes": codes, "start_date": start_date,
+        "end_date": end_date, "interval": interval, "offset": offset, "source": source,
+    })
 
 
 @mcp.tool
@@ -2439,7 +2626,7 @@ def screen_market(market: str, sort_by: str = "change_pct", top_n: int = 30) -> 
 
 
 @mcp.tool
-def search_symbol(query: str, limit: int = 10) -> str:
+def search_symbol(query: str, limit: int = 10, refresh: bool = False) -> str:
     """Resolve a company name or ticker fragment to candidate trading symbols.
 
     Returns candidates with their market in the project's symbol convention
@@ -2451,9 +2638,13 @@ def search_symbol(query: str, limit: int = 10) -> str:
     Args:
         query: Free-text company name or ticker fragment (Chinese or English).
         limit: Maximum number of merged candidates to return.
+        refresh: Request resolver verification instead of session identity reuse.
     """
     registry = _get_registry()
-    return registry.execute("search_symbol", {"query": query, "limit": limit})
+    params = {"query": query, "limit": limit}
+    if refresh:
+        params["refresh"] = True
+    return registry.execute("search_symbol", params)
 
 
 @mcp.tool
@@ -2500,8 +2691,7 @@ def get_fund_nav(
     NAV (复权净值) and the daily growth rate per fund, over an optional date
     window. Codes are bare 6-digit ('110022') or '.OF'-suffixed
     ('110022.OF'). Exchange-listed ETF/LOF are OHLCV instruments — use
-    get_market_data for those. Requires the commercial GILDATA_TOKEN; without
-    it the tool returns a not-available error.
+    get_market_data for those. Requires GILDATA_TOKEN and the fund_nav opt-in.
 
     Args:
         funds: Fund codes, e.g. ["110022", "000198.OF"].
@@ -2526,7 +2716,7 @@ def get_cn_macro_series(query: str, limit: int = 50) -> str:
     GDP, CPI, PPI, PMI, money supply, rates, trade, 31 industry series and
     regional data — dated observations with unit and frequency, asked for in
     natural language. Complements get_macro_series (FRED, US/global).
-    Requires GILDATA_TOKEN; without it the tool returns a not-available error.
+    Requires GILDATA_TOKEN and the macro_series opt-in.
 
     Args:
         query: Natural-language indicator request, e.g. "2024年中国月度CPI同比".
@@ -2543,7 +2733,7 @@ def get_cn_announcements(query: str, limit: int = 50) -> str:
 
     Annual reports, earnings, dividends, buybacks, restructuring, inquiry
     letters — with title, publish date and a highlighted excerpt. For US
-    filings use get_sec_filings. Requires GILDATA_TOKEN.
+    filings use get_sec_filings. Requires GILDATA_TOKEN and the announcements opt-in.
 
     Args:
         query: Natural-language announcement request, e.g. "贵州茅台2024年年度分红公告".
@@ -2560,7 +2750,7 @@ def search_broker_reports(query: str, limit: int = 50) -> str:
 
     Title, broker, industry, rating and a highlighted excerpt of the argument
     — for company deep-dives, industry views and macro commentary. Coexists
-    with get_research_reports (eastmoney-backed). Requires GILDATA_TOKEN.
+    with get_research_reports (eastmoney-backed). Requires GILDATA_TOKEN and the broker_reports opt-in.
 
     Args:
         query: Natural-language research request, e.g. "最近三个月白酒行业的券商研报观点".
@@ -2587,100 +2777,6 @@ def iwencai_search(query: str, limit: int = 20) -> str:
         limit: Maximum securities to return.
     """
     return _execute_key_gated("iwencai_search", {"query": query, "limit": limit})
-
-
-@mcp.tool
-def qveris_search(query: str, limit: int = 20, session_id: str | None = None) -> str:
-    """Search the QVeris premium data/tool marketplace for capabilities.
-
-    Discovery is free. Returns candidate tools with ``tool_id``, ``provider``,
-    ``parameters``, ``expected_cost`` and ``stats.success_rate``; choose by
-    expected cost and success rate before any paid execute. Requires QVeris
-    paid routing (``QVERIS_API_KEY`` and paid mode via ``vibe-trading data
-    mode paid`` or Settings -> QVeris) — without it the tool returns a
-    not-available error.
-
-    Args:
-        query: Capability search query, e.g. "US listed options chain implied
-            volatility Greeks AAPL".
-        limit: Maximum candidates to return.
-        session_id: Optional QVeris session id linking follow-up calls.
-    """
-    params: dict[str, Any] = {"query": query, "limit": limit}
-    if session_id:
-        params["session_id"] = session_id
-    return _execute_key_gated("qveris_search", params)
-
-
-@mcp.tool
-def qveris_inspect(
-    tool_ids: list[str],
-    search_id: str | None = None,
-    session_id: str | None = None,
-) -> str:
-    """Inspect full parameter schemas of QVeris tools before executing them.
-
-    Fetches the complete descriptors for one or more ``tool_ids`` returned by
-    ``qveris_search``. Inspection is free: verify required parameters, enum
-    values, date formats and output shape before a paid call. Requires QVeris
-    paid routing (``QVERIS_API_KEY`` and paid mode via ``vibe-trading data
-    mode paid`` or Settings -> QVeris) — without it the tool returns a
-    not-available error.
-
-    Args:
-        tool_ids: QVeris tool ids taken from ``qveris_search`` results.
-        search_id: Optional search id from the ``qveris_search`` response.
-        session_id: Optional QVeris session id linking follow-up calls.
-    """
-    params: dict[str, Any] = {"tool_ids": tool_ids}
-    if search_id:
-        params["search_id"] = search_id
-    if session_id:
-        params["session_id"] = session_id
-    return _execute_key_gated("qveris_inspect", params)
-
-
-@mcp.tool
-def qveris_execute(
-    tool_id: str,
-    parameters: dict[str, Any],
-    search_id: str | None = None,
-    session_id: str | None = None,
-    model: str | None = None,
-    max_response_size: int = 20480,
-) -> str:
-    """Execute one QVeris capability after discovery and inspection.
-
-    Runs the ``tool_id`` selected via ``qveris_search`` / ``qveris_inspect``.
-    MAY BE BILLABLE — provider calls are charged by QVeris when billable
-    (failed or empty calls are not charged), and the tool enforces the local
-    per-session credit budget before sending the request; the result preserves
-    ``cost`` and ``remaining_credits``. Research/data execution only — it
-    never places orders. Requires QVeris paid routing (``QVERIS_API_KEY`` and
-    paid mode via ``vibe-trading data mode paid`` or Settings -> QVeris) —
-    without it the tool returns a not-available error.
-
-    Args:
-        tool_id: QVeris tool id to execute.
-        parameters: Provider call parameters matching the inspected schema.
-        search_id: Optional search id from the ``qveris_search`` response.
-        session_id: Optional QVeris session id used for budget accounting.
-        model: Optional provider model override.
-        max_response_size: Provider response truncation budget (default
-            20480; -1 disables truncation).
-    """
-    params: dict[str, Any] = {
-        "tool_id": tool_id,
-        "parameters": parameters,
-        "max_response_size": max_response_size,
-    }
-    if search_id:
-        params["search_id"] = search_id
-    if session_id:
-        params["session_id"] = session_id
-    if model:
-        params["model"] = model
-    return _execute_key_gated("qveris_execute", params)
 
 
 # ---------------------------------------------------------------------------
@@ -2857,7 +2953,10 @@ def _register_mirrored_tool(tool_cls: Any) -> bool:
 
         def _call(**kwargs: Any) -> str:
             """Forward an MCP call to the auto-discovered local tool registry."""
-            return _get_registry().execute(name, _mirrored_call_params(schema, kwargs))
+            params = _mirrored_call_params(schema, kwargs)
+            if name == "quantlib_call" and params.get("action") == "call":
+                params.setdefault("run_dir", _calculation_workspace())
+            return _get_registry().execute(name, params)
 
         mcp.add_tool(
             FunctionTool(
@@ -2920,6 +3019,7 @@ def _run_to_dict(run, *, timed_out: bool = False, is_stale: bool = False) -> dic
         "error": run_level_error(run),
         "tasks": [serialize_task(t) for t in run.tasks],
         "final_report": run.final_report,
+        "report_is_partial": run.report_is_partial,
         "total_input_tokens": run.total_input_tokens,
         "total_output_tokens": run.total_output_tokens,
         "provider": public_provider_metadata(run.provider),
@@ -3077,7 +3177,8 @@ def retry_run(run_id: str, resume: bool = False) -> str:
 
     With ``resume=True`` (replay), completed upstream tasks and their artifacts
     are carried into the new run as-is and only the failed/cancelled subgraph
-    re-executes — completed independent branches are not re-run. ``resume``
+    continues from compatible saved context, or restarts from retained reports
+    when no checkpoint exists. Completed independent branches are not re-run. ``resume``
     only applies to a ``failed`` or ``cancelled`` run; ``resume=True`` for any
     other status is refused with an error (a plain retry without ``resume``
     remains available for any non-running run).
@@ -3307,6 +3408,22 @@ def scan_shadow_signals(
 
 
 # ---------------------------------------------------------------------------
+# Research Lab
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+def research_lab(action: str, request: dict | None = None) -> str:
+    """Run sealed cost/OOS experiments, factor audits, or offline task replay.
+
+    Args:
+        action: catalog, show, cost_sensitivity, walk_forward, factor_audit, replay.
+        request: Shared Research Lab request; catalog lists available inputs.
+    """
+    return _get_registry().execute("research_lab", {"action": action, "request": request or {}})
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -3352,7 +3469,7 @@ def main():
     _include_shell_tools = _resolve_include_shell_tools(args.enable_shell_tools)
     # After the shell-tool decision: that switch must come from the launch
     # flag or process env, never from a .env written for the web server.
-    from src.providers.llm import _ensure_dotenv
+    from src.providers.settings import _ensure_dotenv
 
     _ensure_dotenv()
     _registry = None

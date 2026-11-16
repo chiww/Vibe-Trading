@@ -29,7 +29,7 @@ from typing import Any, Iterable, Optional
 from langchain_core.messages import AIMessage, AIMessageChunk
 
 from src.config.accessor import get_env_config
-from src.providers.claude_cli_policy import (
+from src.providers.tool_policy import (
     bash_policy,
     offered_tools,
     screen_calls,
@@ -65,8 +65,8 @@ ISOLATION_ARGS = (
 _STRIPPED_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL")
 
 
-def child_env() -> dict[str, str]:
-    return {k: v for k, v in os.environ.items() if k not in _STRIPPED_ENV}
+def child_env(environment: dict[str, str] | None = None) -> dict[str, str]:
+    return {k: v for k, v in (os.environ if environment is None else environment).items() if k not in _STRIPPED_ENV}
 
 
 _PROTOCOL = (
@@ -89,7 +89,7 @@ _FINAL_ONLY = (
 _FALLBACK_CLI_PATH = Path.home() / ".local" / "bin" / "claude"
 
 
-def resolve_claude_cli() -> str:
+def resolve_claude_cli(environment: dict[str, str] | None = None) -> str:
     """Return the ``claude`` executable: ``CLAUDE_CLI_PATH``, PATH, then ``~/.local/bin``.
 
     Returns:
@@ -98,10 +98,10 @@ def resolve_claude_cli() -> str:
     Raises:
         RuntimeError: No executable was found.
     """
-    explicit = get_env_config().llm.claude_cli_path.strip()
+    explicit = (get_env_config().llm.claude_cli_path if environment is None else environment.get("CLAUDE_CLI_PATH", "")).strip()
     if explicit:
         return explicit
-    found = shutil.which("claude")
+    found = shutil.which("claude") if environment is None else shutil.which("claude", path=environment.get("PATH", ""))
     if found:
         return found
     if _FALLBACK_CLI_PATH.is_file():
@@ -247,7 +247,7 @@ def _schema(allow_tools: bool) -> dict[str, Any]:
 class _Decision:
     content: str = ""
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
-    usage: dict[str, int] = field(
+    usage: dict[str, Any] = field(
         default_factory=lambda: {
             "input_tokens": 0,
             "output_tokens": 0,
@@ -265,6 +265,7 @@ def _run_cli(
     effort: str = "",
     timeout: float,
     cancel_event: threading.Event,
+    environment: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run one ``claude -p`` turn and return its parsed JSON result."""
     fd, system_path = tempfile.mkstemp(prefix="vibe-claude-cli-", suffix=".md")
@@ -275,7 +276,7 @@ def _run_cli(
         # the model's own default in place.
         effort_args = ["--effort", effort] if effort in CLAUDE_CLI_EFFORT_LEVELS else []
         cmd = [
-            resolve_claude_cli(),
+            resolve_claude_cli(environment),
             "-p",
             *ISOLATION_ARGS,
             "--output-format",
@@ -288,7 +289,7 @@ def _run_cli(
             "--json-schema",
             json.dumps(_schema(allow_tools)),
         ]
-        env = child_env()
+        env = child_env(environment)
         proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -335,22 +336,29 @@ def _run_cli(
     return payload
 
 
-def _usage(payload: dict[str, Any]) -> dict[str, int]:
+def _usage(payload: dict[str, Any]) -> dict[str, Any]:
     usage = payload.get("usage") or {}
-    tokens_in = sum(
-        int(usage.get(k) or 0)
-        for k in (
-            "input_tokens",
-            "cache_creation_input_tokens",
-            "cache_read_input_tokens",
+    creation = usage.get("cache_creation") or {}
+    cache_creation = int(usage.get("cache_creation_input_tokens") or 0)
+    if "cache_creation_input_tokens" not in usage:
+        cache_creation = sum(
+            int(creation.get(key, usage.get(key)) or 0)
+            for key in ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")
         )
-    )
+    cache_read = int(usage.get("cache_read_input_tokens") or 0)
+    tokens_in = int(usage.get("input_tokens") or 0) + cache_creation + cache_read
     tokens_out = int(usage.get("output_tokens") or 0)
-    return {
+    result: dict[str, Any] = {
         "input_tokens": tokens_in,
         "output_tokens": tokens_out,
         "total_tokens": tokens_in + tokens_out,
     }
+    if cache_creation or cache_read:
+        result["input_token_details"] = {
+            "cache_read": cache_read,
+            "cache_creation": cache_creation,
+        }
+    return result
 
 
 def _native_attempt_reason(payload: dict[str, Any]) -> str:
@@ -374,6 +382,7 @@ def _decide(
     tools: list[dict[str, Any]],
     timeout: float,
     cancel_event: threading.Event,
+    environment: dict[str, str] | None = None,
 ) -> Optional[_Decision]:
     """Ask the CLI for the next step; refused calls are fed back for a new choice.
 
@@ -381,7 +390,7 @@ def _decide(
     decision past ``timeout``.
     """
     deadline = time.monotonic() + timeout
-    offered = offered_tools(tools)
+    offered = offered_tools(tools, legacy_defaults=True)
     offered_names = {tool_name(t) for t in offered}
     system, user_input = _render(messages)
     allow_tools = bool(offered)
@@ -394,26 +403,37 @@ def _decide(
     for _ in range(_MAX_RETRIES + 1):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise RuntimeError(f"claude-cli: decision exceeded {timeout:.0f}s")
-        payload = _run_cli(
-            system=system,
-            user_input=user_input,
-            allow_tools=allow_tools,
-            model=model,
-            effort=effort,
-            timeout=remaining,
-            cancel_event=cancel_event,
-        )
+            error = RuntimeError(f"claude-cli: decision exceeded {timeout:.0f}s")
+            error.usage_metadata = decision.usage
+            raise error
+        try:
+            payload = _run_cli(
+                system=system,
+                user_input=user_input,
+                allow_tools=allow_tools,
+                model=model,
+                effort=effort,
+                timeout=remaining,
+                cancel_event=cancel_event,
+                environment=environment,
+            )
+        except Exception as exc:
+            exc.usage_metadata = decision.usage
+            raise
         if payload.get("cancelled"):
             return None
-        # The loop reads input_tokens as the current context size; summing the
-        # re-sent prompt over feedback retries would double it and compact early.
         attempt = _usage(payload)
-        decision.usage["input_tokens"] = attempt["input_tokens"]
-        decision.usage["output_tokens"] += attempt["output_tokens"]
-        decision.usage["total_tokens"] = (
-            decision.usage["input_tokens"] + decision.usage["output_tokens"]
-        )
+        # Billing accumulates every invocation; compaction uses only the last
+        # prompt, not the sum of prompts resent during feedback retries.
+        decision.usage["context_input_tokens"] = attempt["input_tokens"]
+        decision.usage["calls"] = decision.usage.get("calls", 0) + 1
+        for key in ("input_tokens", "output_tokens", "total_tokens"):
+            decision.usage[key] += attempt[key]
+        for key in ("input_token_details", "output_token_details"):
+            if key in attempt:
+                details = decision.usage.setdefault(key, {})
+                for name, count in attempt[key].items():
+                    details[name] = details.get(name, 0) + count
         output = payload["structured_output"]
         calls = (
             (output.get("tool_calls") or [])
@@ -444,7 +464,7 @@ def _decide(
             )
             failure = "final answers kept arriving without content"
             continue
-        accepted, notes = screen_calls(calls, offered_names)
+        accepted, notes = screen_calls(calls, offered_names, legacy_defaults=True)
         if not notes:
             decision.content = str(output.get("content") or "")
             decision.tool_calls = [
@@ -462,7 +482,9 @@ def _decide(
             + "\nChoose different calls or answer with what you have."
         )
         failure = "tool calls kept violating the host policy: " + "; ".join(notes)
-    raise RuntimeError(f"claude-cli: {failure}")
+    error = RuntimeError(f"claude-cli: {failure}")
+    error.usage_metadata = decision.usage
+    raise error
 
 
 class ClaudeCliLLM:
@@ -477,6 +499,7 @@ class ClaudeCliLLM:
         timeout: int = 120,
         reasoning_effort: str = "",
         tools: list[dict[str, Any]] | None = None,
+        environment: dict[str, str] | None = None,
     ) -> None:
         """Configure one CLI-backed model.
 
@@ -492,7 +515,8 @@ class ClaudeCliLLM:
             RuntimeError: ``CLAUDE_CLI_BASH_POLICY`` is not a known policy, so
                 the error surfaces before a paid turn rather than after one.
         """
-        bash_policy()
+        bash_policy(legacy_defaults=True)
+        self.environment = None if environment is None else dict(environment)
         self.model = model
         self.timeout = timeout
         self.reasoning_effort = reasoning_effort
@@ -512,6 +536,7 @@ class ClaudeCliLLM:
             timeout=self.timeout,
             reasoning_effort=self.reasoning_effort,
             tools=tools,
+            environment=self.environment,
         )
 
     def _budget(self, config: Optional[dict[str, Any]]) -> float:
@@ -552,6 +577,7 @@ class ClaudeCliLLM:
             tools=self.tools,
             timeout=self._budget(config),
             cancel_event=threading.Event(),
+            environment=self.environment,
         )
         return self._message(decision or _Decision())
 
@@ -583,6 +609,7 @@ class ClaudeCliLLM:
                     tools=self.tools,
                     timeout=budget,
                     cancel_event=cancel_event,
+                    environment=self.environment,
                 )
                 if decision is not None:
                     chunks.put(
@@ -651,3 +678,124 @@ class ClaudeCliLLM:
             The message :meth:`invoke` returns.
         """
         return await asyncio.to_thread(self.invoke, messages, config, **kwargs)
+
+
+_MODEL_LIST_TIMEOUT_S = 30
+_MODEL_LIST_TTL_S = 300
+
+
+@dataclass(frozen=True)
+class ClaudeCliModel:
+    """One model the local login can run, with the effort levels it accepts.
+
+    Attributes:
+        model_id: Full model name, as passed to ``--model``.
+        effort_levels: Levels the model accepts; empty when it takes none.
+    """
+
+    model_id: str
+    effort_levels: tuple[str, ...]
+
+
+_model_cache: dict[str, tuple[float, tuple[ClaudeCliModel, ...]]] = {}
+# One CLI launch at a time: a settings page opened twice, or an auto-load racing
+# a manual refresh, should wait for the first answer instead of spawning another.
+_model_cache_lock = threading.Lock()
+
+
+def list_claude_cli_models(*, refresh: bool = False) -> tuple[ClaudeCliModel, ...]:
+    """Return the models the local Claude Code login can run.
+
+    Asks the CLI with an ``initialize`` control request, which starts no model
+    turn. Aliases such as ``opus`` and ``default`` resolve to the same full name,
+    so entries are de-duplicated on that name: a saved full name stays pinned
+    instead of following whatever an alias points to after a CLI update.
+
+    Args:
+        refresh: Skip the cached list and ask the CLI again.
+
+    Returns:
+        One entry per distinct full model name, in the CLI's order.
+
+    Raises:
+        RuntimeError: The CLI is missing, failed, or returned no models.
+    """
+    executable = resolve_claude_cli()
+    with _model_cache_lock:
+        cached = _model_cache.get(executable)
+        if cached and not refresh and time.monotonic() - cached[0] < _MODEL_LIST_TTL_S:
+            return cached[1]
+        models = _query_claude_cli_models(executable)
+        _model_cache[executable] = (time.monotonic(), models)
+        return models
+
+
+def _query_claude_cli_models(executable: str) -> tuple[ClaudeCliModel, ...]:
+    request = {
+        "type": "control_request",
+        "request_id": f"models_{uuid.uuid4().hex[:8]}",
+        "request": {"subtype": "initialize"},
+    }
+    try:
+        result = subprocess.run(
+            [
+                executable,
+                "-p",
+                *ISOLATION_ARGS,
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+            ],
+            input=json.dumps(request) + "\n",
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=_MODEL_LIST_TIMEOUT_S,
+            env=child_env(),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(
+            f"claude model list unavailable: {type(exc).__name__}"
+        ) from exc
+    raw_models: list[Any] = []
+    for line in (result.stdout or "").splitlines():
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(message, dict) and message.get("type") == "control_response":
+            outer = message.get("response")
+            inner = outer.get("response") if isinstance(outer, dict) else None
+            models_field = inner.get("models") if isinstance(inner, dict) else None
+            raw_models = models_field if isinstance(models_field, list) else []
+            break
+    models: list[ClaudeCliModel] = []
+    seen: set[str] = set()
+    for entry in raw_models:
+        if not isinstance(entry, dict):
+            continue
+        model_id = str(entry.get("resolvedModel") or "").strip()
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        levels = (
+            (entry.get("supportedEffortLevels") or [])
+            if entry.get("supportsEffort")
+            else []
+        )
+        models.append(
+            ClaudeCliModel(
+                model_id=model_id,
+                effort_levels=tuple(
+                    level for level in levels if level in CLAUDE_CLI_EFFORT_LEVELS
+                ),
+            )
+        )
+    if not models:
+        raise RuntimeError(
+            f"claude model list unavailable (exit {result.returncode}): "
+            f"{(result.stderr or '')[:300]}"
+        )
+    return tuple(models)

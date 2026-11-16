@@ -47,6 +47,11 @@ from src.agent.tools import BaseTool
 from src.config.accessor import get_env_config
 from src.config.paths import get_runtime_root
 from src.factors.data_availability import build_availability_contract
+from src.factors.research_contract import (
+    RESEARCH_MODES,
+    RESEARCH_STAGES,
+    build_bench_research_contract,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -326,6 +331,8 @@ def _load_csi300_panel(start: str, end: str) -> dict[str, pd.DataFrame]:
     except ImportError as exc:
         raise RuntimeError(f"tushare not installed: {exc}") from exc
 
+    from src.data_gateway.reads import managed_reader
+
     pro = ts.pro_api(token)
     sd = start.replace("-", "")
     ed = end.replace("-", "")
@@ -338,7 +345,7 @@ def _load_csi300_panel(start: str, end: str) -> dict[str, pd.DataFrame]:
         # Reach back before ``start`` so the snapshot that was in force on the
         # first requested day is included; Tushare publishes month-end rosters.
         lookback = (pd.Timestamp(start) - pd.Timedelta(days=60)).strftime("%Y%m%d")
-        weights = pro.index_weight(
+        weights = managed_reader(pro.index_weight)(
             index_code="399300.SZ", start_date=lookback, end_date=ed
         )
         if weights is not None and not weights.empty:
@@ -378,7 +385,7 @@ def _load_csi300_panel(start: str, end: str) -> dict[str, pd.DataFrame]:
     # loader drops. Tushare's free tier permits ~200 calls/min so 4 concurrent
     # workers is comfortably under the rate limit even for a full 300-name list.
     def _fetch_one(code: str) -> tuple[str, pd.DataFrame | None]:
-        df = _retry(lambda: pro.daily(ts_code=code, start_date=sd, end_date=ed))
+        df = _retry(lambda: managed_reader(pro.daily)(ts_code=code, start_date=sd, end_date=ed))
         if df is None or df.empty:
             return code, None
         df = df.sort_values("trade_date").copy()
@@ -390,7 +397,7 @@ def _load_csi300_panel(start: str, end: str) -> dict[str, pd.DataFrame]:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
         keep = [c for c in ("open", "high", "low", "close", "volume", "amount") if c in df.columns]
         df = df[keep].dropna(subset=["open", "high", "low", "close"])
-        factor = _retry(lambda: pro.adj_factor(ts_code=code, start_date=sd, end_date=ed))
+        factor = _retry(lambda: managed_reader(pro.adj_factor)(ts_code=code, start_date=sd, end_date=ed))
         return code, _apply_qfq(df, factor)
 
     fetched: dict[str, pd.DataFrame] = {}
@@ -578,9 +585,9 @@ def _fetch_sp500_constituents() -> tuple[list[str], dict[str, str]]:
     try:
         import io
 
-        import requests
+        from src.data_gateway.reads import public_http_get
 
-        resp = requests.get(
+        resp = public_http_get(
             url,
             headers={
                 "User-Agent": (
@@ -1269,6 +1276,19 @@ def run_alpha_bench(**kwargs: Any) -> dict[str, Any]:
     if not period or not isinstance(period, str):
         return {"status": "error", "error": "period is required (string)"}
 
+    research_mode = kwargs.get("research_mode", "explore")
+    research_stage = kwargs.get("research_stage", "single_factor_evaluation")
+    if research_mode not in RESEARCH_MODES:
+        return {
+            "status": "error",
+            "error": f"research mode must be one of {RESEARCH_MODES}",
+        }
+    if research_stage not in RESEARCH_STAGES:
+        return {
+            "status": "error",
+            "error": f"research stage must be one of {RESEARCH_STAGES}",
+        }
+
     try:
         _parse_period(period)
     except ValueError as exc:
@@ -1395,6 +1415,19 @@ def run_alpha_bench(**kwargs: Any) -> dict[str, Any]:
         period=period,
         required_fields=required_fields,
     )
+    try:
+        universe_meta["research"] = build_bench_research_contract(
+            mode=research_mode,
+            stage=research_stage,
+            universe=universe,
+            period=period,
+            factor_ids=alpha_ids,
+            zoo=kwargs.get("zoo"),
+            horizon=horizon,
+            method="rank_ic",
+        )
+    except ValueError as exc:
+        return {"status": "error", "error": str(exc)}
 
     context = {
         "csp": _CSP,
@@ -1475,6 +1508,16 @@ class AlphaBenchTool(BaseTool):
                     "non-overlapping (end-anchored); 21 ≈ monthly, the "
                     "conventional horizon for fundamental factors. Range 1-252."
                 ),
+            },
+            "research_stage": {
+                "type": "string",
+                "enum": list(RESEARCH_STAGES),
+                "default": "single_factor_evaluation",
+                "description": "Stage recorded in the factor-research contract.",
+            },
+            "research_mode": {
+                "type": "string", "enum": list(RESEARCH_MODES), "default": "explore",
+                "description": "Declared research mode; metadata only, does not enforce locked evaluation.",
             },
             "output_dir": {
                 "type": "string",

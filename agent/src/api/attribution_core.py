@@ -685,13 +685,18 @@ def _attribution_brinson_asset_class_mode(
 
     class_weights: Dict[str, float] = {}
     class_return_sums: Dict[str, float] = {}
+    # A class with any unpriced member has no measurable return: summing only
+    # the priced members over the full class weight reads the rest as 0%.
+    unresolved_classes: set[str] = set()
     for symbol, weight in weights.items():
         if weight == 0.0:
             continue
         asset_class = str(_detect_market(symbol))
         class_weights[asset_class] = class_weights.get(asset_class, 0.0) + weight
         symbol_return = _attribution_symbol_cumulative_return(run_dir, symbol)
-        if symbol_return is not None:
+        if symbol_return is None:
+            unresolved_classes.add(asset_class)
+        else:
             class_return_sums[asset_class] = class_return_sums.get(asset_class, 0.0) + weight * symbol_return
 
     portfolio_weights: Dict[str, float] = {}
@@ -700,7 +705,11 @@ def _attribution_brinson_asset_class_mode(
     for asset_class, class_weight in class_weights.items():
         # A class whose long/short weights net to zero (market-neutral pair
         # inside one class) would divide by zero below; degrade instead.
-        if asset_class not in class_return_sums or abs(class_weight) <= _ATTRIBUTION_CLASS_WEIGHT_FLOOR:
+        if (
+            asset_class in unresolved_classes
+            or asset_class not in class_return_sums
+            or abs(class_weight) <= _ATTRIBUTION_CLASS_WEIGHT_FLOOR
+        ):
             degraded = True
             break
         portfolio_weights[asset_class] = class_weight
@@ -823,17 +832,18 @@ def _build_attribution_payload(run_dir: Path) -> Dict[str, Any]:
     config_benchmark = config.get("benchmark")
     if isinstance(config_benchmark, dict):
         config_benchmark = config_benchmark.get("ticker") or config_benchmark.get("code")
-    if config_benchmark is not None and str(config_benchmark).strip():
-        benchmark_ticker = str(config_benchmark).strip()
-    if benchmark_ticker is None:
-        _metrics_fields, metrics_rows = _attribution_read_csv(run_dir / "artifacts" / "metrics.csv")
-        if metrics_rows:
-            candidate = metrics_rows[0].get("benchmark_ticker")
-            if candidate is not None and str(candidate).strip():
-                benchmark_ticker = str(candidate).strip()
+    _, metrics_rows = _attribution_read_csv(run_dir / "artifacts" / "metrics.csv")
+    recorded = metrics_rows[0] if metrics_rows else {}
+    # New runs record the reference actually used, including a fallback after
+    # an explicit fetch failed. Older runs only had a ticker or the request.
+    if recorded.get("benchmark_kind") != "equal_weight":
+        candidate = recorded.get("benchmark_ticker") or config_benchmark
+        if candidate and str(candidate).strip() not in {"", "auto"}:
+            benchmark_ticker = str(candidate).strip()
 
     if benchmark_ticker is not None:
-        payload["benchmark"] = {"ticker": benchmark_ticker, "mode": "explicit"}
+        mode = "auto_market" if config_benchmark == "auto" else "explicit"
+        payload["benchmark"] = {"ticker": benchmark_ticker, "mode": mode}
     else:
         payload["benchmark"] = {"ticker": None, "mode": "auto_equal_weight"}
 

@@ -51,7 +51,7 @@ import logging
 import math
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Iterable, Literal, Mapping
 
 import numpy as np
 import pandas as pd
@@ -64,7 +64,15 @@ from src.factors.registry import (
     get_default_registry,
 )
 from src.factors.data_availability import build_availability_contract
-from src.tools.alpha_bench_tool import _MAX_HORIZON, _compute_forward_returns, _load_universe_panel
+from src.factors.research_contract import build_bench_research_contract
+from src.tools.alpha_bench_tool import (
+    _MAX_HORIZON,
+    _compute_forward_returns,
+    _load_universe_panel,
+    _prepare_bench_panel,
+    _split_alphas_by_universe_support,
+    _validate_bench_data_requirements,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -329,6 +337,10 @@ def run_bench_strict(
     horizon: int = 1,
     on_progress: ProgressCb | None = None,
     registry: Registry | None = None,
+    research_mode: str = "strict",
+    research_stage: str = "single_factor_evaluation",
+    research_lineage: Iterable[str | Mapping[str, Any]] | None = None,
+    research_transformations: Iterable[str | Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Strict-mode bench: like ``run_bench`` but with mandatory random control.
 
@@ -361,6 +373,13 @@ def run_bench_strict(
             fundamental factors.
         on_progress: Optional ``(n_done, n_total, alpha_id)`` callback.
         registry: Optional pre-built registry for tests.
+        research_mode: Declared evidence mode for the additive research
+            contract. It is metadata only and does not change strict bench
+            statistics.
+        research_stage: Stage name recorded in the research contract.
+        research_lineage: Optional structured inputs for artifact lineage.
+        research_transformations: Optional transformations applied before the
+            bench.
 
     Returns:
         Dict containing all the keys ``run_bench()`` returns, plus:
@@ -455,12 +474,29 @@ def run_bench_strict(
     if not alpha_ids:
         return _finish_error(f"no alphas registered under zoo={zoo!r}")
 
+    # Same selection and panel preparation as ``run_bench``: exclude ``fund:``
+    # alphas a non-sp500 universe cannot serve, and attach the SEC ``fund:``,
+    # tushare ``val:`` and csi300 ``sector`` inputs the cached panel omits.
+    alpha_ids, universe_excluded = _split_alphas_by_universe_support(
+        reg, alpha_ids, universe
+    )
+    if universe_excluded:
+        entry["universe_excluded"] = universe_excluded
+    if not alpha_ids:
+        return _finish_error(
+            f"all {len(universe_excluded)} selected alphas require SEC US filings "
+            f"(fund:* inputs); the {universe!r} universe cannot serve them. "
+            "Choose the S&P 500 universe."
+        )
+
     try:
+        _validate_bench_data_requirements(reg, alpha_ids, universe)
         panel = _load_universe_panel(universe, period)
     except (ValueError, NotImplementedError, RuntimeError) as exc:
         return _finish_error(f"universe load failed: {exc}")
 
     try:
+        panel = _prepare_bench_panel(reg, alpha_ids, panel, universe, period)
         return_df = _compute_forward_returns(panel, horizon=horizon)
     except Exception as exc:  # noqa: BLE001
         return _finish_error(f"forward returns failed: {exc}")
@@ -498,10 +534,14 @@ def run_bench_strict(
         try:
             factor_df = reg.compute(aid, panel)
             signal_ic = compute_ic_series(factor_df, return_df)
-            if signal_ic.empty:
-                skipped.append(
-                    {"id": aid, "reason": "empty IC series", "kind": "typed"}
+            if len(signal_ic) < 2:
+                # ddof=1 std of one IC is NaN; match bench_runner's guard.
+                reason = (
+                    "empty IC series"
+                    if signal_ic.empty
+                    else "insufficient IC observations (need at least 2)"
                 )
+                skipped.append({"id": aid, "reason": reason, "kind": "typed"})
                 _fire_progress(idx, aid)
                 continue
 
@@ -641,6 +681,19 @@ def run_bench_strict(
         universe=universe,
         period=period,
         required_fields=required_fields,
+    )
+    universe_meta["research"] = build_bench_research_contract(
+        mode=research_mode,
+        stage=research_stage,
+        universe=universe,
+        period=period,
+        factor_ids=alpha_ids,
+        zoo=zoo,
+        lineage=research_lineage,
+        transformations=research_transformations,
+        horizon=horizon,
+        method="paired_random_control" if random_control else "rank_ic",
+        oos_boundary=effective_oos_split,
     )
 
     # Strip the underscore-prefixed sort helper keys from the wire-bound

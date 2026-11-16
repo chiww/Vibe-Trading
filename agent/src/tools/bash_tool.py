@@ -10,6 +10,7 @@ import subprocess
 from typing import Any
 
 from src.agent.tools import BaseTool
+from src.data_gateway.guidance import SHELL_DATA_GUIDANCE
 from src.tools._shell_safety import broad_python_kill_error
 
 _OUTPUT_LIMIT = 50_000
@@ -68,7 +69,7 @@ class BashTool(BaseTool):
         "by name; stop a background_run task with cancel_background. "
         "Heredocs (<<) are NOT supported on cmd.exe - write your script to "
         "a file with write_file first, then run it (e.g. python script.py)."
-    )
+    ) + SHELL_DATA_GUIDANCE
     parameters = {
         "type": "object",
         "properties": {
@@ -99,8 +100,9 @@ class BashTool(BaseTool):
         # cmd.exe has no heredocs; return a clear message instead of the
         # cryptic "<< was unexpected at this time." stderr. Only multi-line
         # commands with a heredoc delimiter are flagged, so a single-line
-        # bit shift (python -c "print(1 << 2)") is unaffected.
-        if "\n" in command and re.search(
+        # bit shift (python -c "print(1 << 2)") is unaffected. POSIX shells
+        # support heredocs natively, so this only applies on Windows.
+        if os.name == "nt" and "\n" in command and re.search(
             r"<<\s*['\"]?[A-Za-z_][A-Za-z0-9_]*", command
         ):
             return json.dumps(

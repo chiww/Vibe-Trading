@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import pytest
 
-from src.agent.grounding.ledger import GroundingLedger
+from evals.grounding.ledger import GroundingLedger
 from src.trading import profiles as trading_profiles
 from src.trading import service as trading_service
 from src.tools import symbol_search_tool as ss
@@ -941,6 +941,82 @@ class TestFxPairAlignment:
         )
 
 
+class TestBareUsEtfResolution:
+    """US-listed ETFs and funds resolve like equities, not as ``global``.
+
+    Yahoo carries US ETFs bare (``QQQ``, ``SPY``) while the fetch layer already
+    routes a bare ticker as ``us_equity`` and expects ``<SYM>.US``. The resolver
+    used to emit the bare symbol under market ``global``, so the two layers
+    disagreed and the identity lock rejected every ETF call (#2084).
+    """
+
+    @pytest.mark.parametrize(
+        ("yahoo_symbol", "quote"),
+        [
+            ("QQQ", {"quoteType": "ETF", "exchange": "NGM"}),
+            ("SPY", {"quoteType": "ETF", "exchange": "PCX"}),
+            ("VFIAX", {"quoteType": "MUTUALFUND", "exchange": "NAS"}),
+            # OTC Bulletin Board listings are US listings too.
+            ("ABCD", {"quoteType": "ETF", "exchange": "OBB"}),
+            # Search payloads do not always carry an exchange row.
+            ("QQQ", {"quoteType": "ETF"}),
+        ],
+    )
+    def test_bare_us_fund_gets_us_suffix(self, yahoo_symbol, quote) -> None:
+        assert ss._from_yahoo_symbol(yahoo_symbol, quote) == (
+            f"{yahoo_symbol}.US",
+            "us",
+        )
+
+    def test_bare_fund_on_foreign_venue_stays_native(self) -> None:
+        """A bare symbol Yahoo files under a non-US venue keeps its own form."""
+        assert ss._from_yahoo_symbol(
+            "XIC", {"quoteType": "ETF", "exchange": "TOR"}
+        ) == ("XIC", "global")
+
+    def test_bare_equity_on_foreign_venue_is_not_us(self) -> None:
+        """A bare non-US equity must not be relabelled as a US listing.
+
+        Before the exchange guard, every bare ``EQUITY`` became ``<SYM>.US``,
+        so ``RY`` (Toronto) was published as a US ticker.
+        """
+        assert ss._from_yahoo_symbol(
+            "RY", {"quoteType": "EQUITY", "exchange": "TOR"}
+        ) == ("RY", "global")
+
+    def test_crypto_and_index_unchanged(self) -> None:
+        assert ss._from_yahoo_symbol(
+            "BTC-USD", {"quoteType": "CRYPTOCURRENCY"}
+        ) == ("BTC-USD", "global")
+        assert ss._from_yahoo_symbol("^SPX", {"quoteType": "INDEX"}) == (
+            "^SPX",
+            "index",
+        )
+
+    def test_us_etf_candidate_row_is_fetchable(self) -> None:
+        """End to end: ``QQQ`` surfaces as ``QQQ.US`` / ``us``."""
+        quotes = [
+            {
+                "symbol": "QQQ",
+                "shortname": "Invesco QQQ Trust",
+                "exchange": "NGM",
+                "exchDisp": "NASDAQ",
+                "quoteType": "ETF",
+            }
+        ]
+        with patch.object(
+            ss.eastmoney_client,
+            "get_json",
+            return_value={"QuotationCodeTable": {"Data": []}},
+        ), patch.object(ss.yahoo_client, "search", return_value=quotes), patch.object(
+            ss.sec_edgar_client, "cik_for", return_value=None
+        ):
+            data = json.loads(ss.SymbolSearchTool().execute(query="QQQ"))["data"]
+
+        row = next(c for c in data["candidates"] if c["symbol"] == "QQQ.US")
+        assert row["market"] == "us"
+
+
 class TestCryptoUsdBaseWhitelist:
     """``USD`` quote leg on the crypto resolver is gated on a base whitelist.
 
@@ -1231,3 +1307,36 @@ def test_eastmoney_market_zero_splits_beijing_from_shenzhen(quote_id: str, expec
     candidate = ss._eastmoney_candidate(row)
     assert candidate is not None
     assert candidate["symbol"] == expected
+
+
+@pytest.mark.parametrize("query,expected", [("AAPL.US", "AAPL"), ("aapl.us", "AAPL"), ("BRK-B.US", "BRK-B")])
+def test_project_us_suffix_is_translated_only_for_provider_search(monkeypatch, query, expected):
+    calls = []
+    monkeypatch.setattr(ss, "_search_selected_connector", lambda *args: ([], None, None))
+    monkeypatch.setattr("src.tools.gildata_identity.search_candidates", lambda *args: ([], None))
+    monkeypatch.setattr(ss.sec_edgar_client, "cik_for", lambda *args: None)
+
+    def search(text):
+        calls.append(text)
+        return [
+            {"symbol": expected + ".US", "market": "us", "source": "fixture"},
+            {"symbol": expected + ".L", "market": "uk", "source": "fixture"},
+            {"symbol": "MSFT.US", "market": "us", "source": "fixture"},
+        ], "ok"
+
+    monkeypatch.setattr(ss, "_search_eastmoney", search)
+    monkeypatch.setattr(ss, "_search_yahoo", search)
+    result = json.loads(ss.SymbolSearchTool.execute.__wrapped__(ss.SymbolSearchTool(), query=query))
+    assert calls == [expected, expected]
+    assert result["data"]["query"] == query
+    assert [c["symbol"] for c in result["data"]["candidates"]] == [expected + ".US"]
+
+
+def test_project_us_query_cannot_fabricate_identity_from_wrong_or_missing_hits(monkeypatch):
+    monkeypatch.setattr(ss, "_search_selected_connector", lambda *args: ([], None, None))
+    monkeypatch.setattr("src.tools.gildata_identity.search_candidates", lambda *args: ([], None))
+    monkeypatch.setattr(ss, "_search_eastmoney", lambda *args: ([], "ok"))
+    monkeypatch.setattr(ss, "_search_yahoo", lambda *args: ([{"symbol": "AAPL.L", "market": "uk", "source": "fixture"}], "ok"))
+    result = json.loads(ss.SymbolSearchTool.execute.__wrapped__(ss.SymbolSearchTool(), query="AAPL.US"))
+    assert result["data"]["query"] == "AAPL.US"
+    assert result["data"]["candidates"] == [] and result["data"]["count"] == 0

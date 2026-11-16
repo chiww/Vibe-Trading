@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from src.providers import settings as _provider_configuration
+
 import json
 import time
 from pathlib import Path
@@ -32,6 +34,17 @@ from src.providers.openai_codex import (
 DEFAULT_CODEX_MODEL = "openai-codex/gpt-6-sol"
 
 
+@pytest.mark.parametrize("effort", ["none", "minimal", "ultra", "persistent"])
+def test_explicit_catalog_effort_reaches_the_wire(effort):
+    adapter = OpenAICodexLLM(model=DEFAULT_CODEX_MODEL, reasoning_effort=effort)
+    assert adapter._body([], stream=True)["reasoning"] == {"effort": effort}
+
+
+def test_unset_catalog_effort_preserves_provider_default():
+    adapter = OpenAICodexLLM(model=DEFAULT_CODEX_MODEL)
+    assert "reasoning" not in adapter._body([], stream=True)
+
+
 def _jwt(payload: dict[str, object]) -> str:
     """Build an unsigned JWT-shaped value for claim parsing tests."""
     import base64
@@ -59,7 +72,7 @@ def test_codex_base_url_is_restricted_to_chatgpt_endpoint() -> None:
 
 
 def test_build_llm_returns_codex_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(llm_mod, "_dotenv_loaded", True)
+    monkeypatch.setattr(_provider_configuration, "_dotenv_loaded", True)
     monkeypatch.setenv("LANGCHAIN_PROVIDER", "openai-codex")
     monkeypatch.setenv("LANGCHAIN_MODEL_NAME", DEFAULT_CODEX_MODEL)
     monkeypatch.setenv("OPENAI_CODEX_BASE_URL", DEFAULT_CODEX_URL)

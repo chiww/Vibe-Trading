@@ -4,11 +4,11 @@ import path from "path";
 
 const PROXY_PATHS = [
   "/api",
+  "/data",
   "/auth",
   "/sessions",
   "/swarm/presets",
   "/swarm/runs",
-  "/qveris",
   "/settings/llm",
   "/settings/data-sources",
   "/settings/custom-providers",

@@ -10,6 +10,7 @@ const RunDetail = lazy(() =>
 const Compare = lazy(() =>
   import("@/pages/Compare").then((m) => ({ default: m.Compare })),
 );
+const HistoryStorage = lazy(() => import("./components/settings/HistoryStorageSettings").then(m => ({ default: m.HistoryStorageSettings })));
 const Settings = lazy(() =>
   import("@/pages/Settings").then((m) => ({ default: m.Settings })),
 );
@@ -22,6 +23,10 @@ const Scheduled = lazy(() =>
 const Reports = lazy(() =>
   import("@/pages/Reports").then((m) => ({ default: m.Reports })),
 );
+const ResearchArtifacts = lazy(() =>
+  import("@/pages/ResearchArtifacts").then((m) => ({ default: m.ResearchArtifacts })),
+);
+const ResearchLab = lazy(() => import("@/pages/ResearchLab").then((m) => ({ default: m.ResearchLab })));
 const PaperTrading = lazy(() => import("@/pages/PaperTrading").then((m) => ({ default: m.PaperTrading })));
 const Portfolio = lazy(() =>
   import("@/pages/Portfolio").then((m) => ({ default: m.Portfolio })),
@@ -66,9 +71,12 @@ export const router = createBrowserRouter([
       { path: "/runtime", element: wrap(Runtime) },
       { path: "/scheduled", element: wrap(Scheduled) },
       { path: "/reports", element: wrap(Reports) },
+      { path: "/research-artifacts", element: wrap(ResearchArtifacts) },
+      { path: "/research-lab", element: wrap(ResearchLab) },
       { path: "/paper-trading", element: wrap(PaperTrading) },
       { path: "/portfolio", element: wrap(Portfolio) },
       { path: "/settings", element: wrap(Settings) },
+      { path: "/history-storage", element: wrap(HistoryStorage) },
       { path: "/runs/:runId", element: wrap(RunDetail) },
       { path: "/compare", element: wrap(Compare) },
       { path: "/correlation", element: wrap(Correlation) },

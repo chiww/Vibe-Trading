@@ -6,6 +6,7 @@ data aggregator covering Chinese and global markets.  No API token required.
 
 from __future__ import annotations
 
+import importlib
 import logging
 import re
 from typing import Dict, List, Optional
@@ -66,12 +67,20 @@ def _sina_contract(code: str) -> str:
 
 _CN_FUTURES_MAIN_RE = re.compile(r"^[A-Z]{1,2}0$")
 
-
-
+#: AKShare moved the forex symbol map between releases: ``akshare.forex.cons``
+#: existed up to 1.19.x and ``akshare.fx.cons_forex`` carries it from 1.20.0 on,
+#: where the whole ``akshare.forex`` package was deleted. requirements only pin
+#: ``akshare>=1.12.0``, so both layouts have to be probed — importing a single
+#: hard-coded path silently degrades forex detection to "never a forex pair",
+#: which routes FX symbols to the A-share endpoint.
+_FOREX_SYMBOL_MAP_MODULES = (
+    "akshare.fx.cons_forex",  # akshare >= 1.20.0
+    "akshare.forex.cons",  # akshare <= 1.19.x
+)
 
 
 def _is_forex(code: str) -> bool:
-    """Detect forex pairs by matching against AKShare's symbol_market_map.
+    """Detect forex pairs by matching against AKShare's symbol map.
 
     Issue #54 — forex symbols (EURUSD, GBPUSD, etc.) have no exchange suffix
     and previously fell through to the A-share endpoint.
@@ -79,11 +88,15 @@ def _is_forex(code: str) -> bool:
     # Accept the canonical slash form (EUR/USD) too, so the forex fallback
     # chain (mt5 → akshare) actually engages for project-style codes.
     upper = code.upper().removesuffix(".FX").replace("/", "")
-    try:
-        from akshare.forex.cons import symbol_market_map
-    except Exception:
-        return False
-    return upper in symbol_market_map
+    for module_name in _FOREX_SYMBOL_MAP_MODULES:
+        try:
+            module = importlib.import_module(module_name)
+            symbol_market_map = module.symbol_market_map
+        except (ImportError, AttributeError):  # layout moved again, or module unavailable
+            continue
+        if upper in symbol_market_map:
+            return True
+    return False
 
 
 @register
@@ -133,8 +146,16 @@ class DataLoader:
         """
         validate_date_range(start_date, end_date)
 
+        self.fetch_errors = {}
         result: Dict[str, pd.DataFrame] = {}
         for code in codes:
+            from .acquisition import source_deadline
+            import time
+
+            until = source_deadline.get()
+            if until is not None and time.monotonic() >= until:
+                self.fetch_errors[code] = "request_deadline"
+                continue
             try:
                 df = cached_loader_fetch(
                     source=self.name,
@@ -177,6 +198,9 @@ class DataLoader:
                 if df is not None and not df.empty:
                     result[code] = df
             except Exception as exc:
+                from .base import acquisition_error_kind
+
+                self.fetch_errors[code] = acquisition_error_kind(exc)
                 logger.warning("akshare failed for %s: %s", code, exc)
         return result
 
@@ -219,7 +243,7 @@ class DataLoader:
     def _fetch_a_share(
         self, ak, code: str, start_date: str, end_date: str, interval: str,
     ) -> Optional[pd.DataFrame]:
-        """Fetch A-share via stock_zh_a_hist."""
+        """Fetch A-share history across the AKShare 1.20.46 endpoint rename."""
         symbol = code.split(".")[0]
         period = _INTERVAL_MAP_DAILY.get(interval)
         if period is None:
@@ -229,7 +253,8 @@ class DataLoader:
             )
         sd = start_date.replace("-", "")
         ed = end_date.replace("-", "")
-        df = ak.stock_zh_a_hist(
+        history = getattr(ak, "stock_zh_a_hist_em", None) or ak.stock_zh_a_hist
+        df = history(
             symbol=symbol,
             period=period,
             start_date=sd,
@@ -257,7 +282,8 @@ class DataLoader:
                 f"Unsupported interval {interval!r}; akshare a-share supports "
                 f"{sorted(_INTERVAL_MAP_DAILY)}"
             )
-        df = ak.stock_zh_a_hist(
+        history = getattr(ak, "stock_zh_a_hist_em", None) or ak.stock_zh_a_hist
+        df = history(
             symbol=symbol,
             period=period,
             start_date=start_date.replace("-", ""),
@@ -269,13 +295,14 @@ class DataLoader:
         return self._normalize(df, date_col="日期")
 
     def _fetch_us(self, ak, code: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
-        """Fetch US stock via stock_us_hist."""
+        """Fetch US stock history with current or legacy AKShare naming."""
         symbol = code.replace(".US", "")
+        history = getattr(ak, "stock_us_hist_em", None) or ak.stock_us_hist
         # akshare uses Eastmoney market ids: 105 NASDAQ, 106 NYSE, 107 AMEX /
         # NYSE Arca (where most US ETFs such as SPY list).
         for prefix in ["105.", "106.", "107.", ""]:
             try:
-                df = ak.stock_us_hist(
+                df = history(
                     symbol=f"{prefix}{symbol}",
                     period="daily",
                     start_date=start_date.replace("-", ""),
@@ -304,14 +331,15 @@ class DataLoader:
         return df.loc[start_date:end_date]
 
     def _fetch_forex(self, ak, code: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
-        """Fetch forex pair via forex_hist_em.
+        """Fetch forex pair via fx_hist_em (formerly forex_hist_em).
 
         Columns returned are 日期 / 代码 / 名称 / 今开 / 最新价 / 最高 / 最低 / 振幅
         — note ``最新价`` (latest) plays the role of close. Volume isn't reported,
         so we synthesize a zero column to satisfy the OHLCV contract.
         """
         symbol = code.upper().removesuffix(".FX").replace("/", "")
-        df = ak.forex_hist_em(symbol=symbol)
+        history = getattr(ak, "fx_hist_em", None) or ak.forex_hist_em
+        df = history(symbol=symbol)
         if df is None or df.empty:
             return None
         df = df.rename(columns={
@@ -332,9 +360,10 @@ class DataLoader:
         return df.loc[start_date:end_date]
 
     def _fetch_hk(self, ak, code: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
-        """Fetch HK stock via stock_hk_hist."""
+        """Fetch HK stock history with current or legacy AKShare naming."""
         symbol = code.replace(".HK", "").zfill(5)
-        df = ak.stock_hk_hist(
+        history = getattr(ak, "stock_hk_hist_em", None) or ak.stock_hk_hist
+        df = history(
             symbol=symbol,
             period="daily",
             start_date=start_date.replace("-", ""),

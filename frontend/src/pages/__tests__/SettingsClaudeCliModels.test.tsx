@@ -1,3 +1,4 @@
+import providerCatalog from "../../../../agent/src/providers/llm_providers.json";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { Settings } from "../Settings";
 
@@ -24,12 +25,14 @@ vi.mock("@/lib/apiAuth", () => ({
 }));
 
 vi.mock("@/components/settings/ChannelSettings", () => ({ ChannelSettings: () => null }));
-vi.mock("@/components/settings/QVerisSettings", () => ({ QVerisSettings: () => null }));
 vi.mock("@/components/settings/SourcePrioritySettings", () => ({
   SourcePrioritySettings: () => null,
 }));
 
 const providers = [
+  { name: "openai-codex", label: "OpenAI Codex", api_key_env: null, base_url_env: null,
+    default_model: "openai-codex/gpt-6-sol", default_base_url: "https://chatgpt.com/backend-api/codex/responses",
+    api_key_required: false, auth_type: "oauth", reasoning_efforts: ["low", "medium", "high", "ultra"] },
   {
     name: "claude-cli",
     label: "Claude Code CLI (local login)",
@@ -93,6 +96,44 @@ function effortOptions(): string[] {
   return Array.from(effortSelect().options).map((option) => option.value);
 }
 
+const catalogOnlyProvider = {
+  ...providerCatalog.find((entry) => entry.name === "novita")!,
+  name: "catalog-test", label: "Catalog Test", api_key_env: "CATALOG_TEST_KEY",
+  base_url_env: "CATALOG_TEST_URL", default_model: "catalog-model",
+};
+
+it.each([
+  ...providerCatalog.filter((p) => ["opencode", "novita"].includes(p.name)).map((provider) => ({ provider, isDesktop: true })),
+  { provider: catalogOnlyProvider, isDesktop: true },
+  { provider: catalogOnlyProvider, isDesktop: false },
+])("saves $provider.name credentials (desktop=$isDesktop)", async ({ provider, isDesktop }) => {
+  const name = provider.name;
+  const settings = llmSettings({ provider: name, providers: [provider], model_name: provider.default_model });
+  const desktop = { isDesktop: true, setCredential: vi.fn().mockResolvedValue({}), restartBackend: vi.fn().mockResolvedValue(true) };
+  vi.stubGlobal("vibeDesktop", isDesktop ? desktop : undefined);
+  try {
+    apiMock.getLLMSettings.mockResolvedValue(settings);
+    apiMock.getDataSourceSettings.mockResolvedValue({});
+    apiMock.updateLLMSettings.mockResolvedValue(settings);
+    render(<Settings />);
+    const form = (await screen.findByDisplayValue(provider.label)).closest("form")!;
+    fireEvent.change(form.querySelector('input[type="password"]')!, { target: { value: "desktop-test-secret" } });
+    fireEvent.click(form.querySelector('button[type="submit"]')!);
+    await waitFor(() => expect(apiMock.updateLLMSettings).toHaveBeenCalled());
+    expect(apiMock.updateLLMSettings).toHaveBeenLastCalledWith(expect.objectContaining({
+      provider: name, api_key: isDesktop ? undefined : "desktop-test-secret", clear_api_key: false,
+    }));
+    if (isDesktop) {
+      await waitFor(() => expect(desktop.restartBackend).toHaveBeenCalled());
+      expect(desktop.setCredential).toHaveBeenCalledWith(provider.api_key_env, "desktop-test-secret");
+    } else {
+      expect(desktop.setCredential).not.toHaveBeenCalled();
+    }
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
 describe("Settings with the claude-cli provider", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -104,6 +145,43 @@ describe("Settings with the claude-cli provider", () => {
       env_path: "agent/.env",
     });
     apiMock.listLLMModels.mockResolvedValue(modelList);
+  });
+
+  it("offers registry model candidates before online discovery and saves the selection", async () => {
+    const provider = {
+      ...providers.find((entry) => entry.name === "openrouter")!,
+      ...providerCatalog.find((entry) => entry.name === "openrouter")!,
+    };
+    const candidate = provider.model_options!.find((model) => model !== provider.default_model)!;
+    const settings = llmSettings({
+      provider: provider.name,
+      model_name: provider.default_model,
+      base_url: provider.default_base_url,
+      providers: [provider],
+    });
+    apiMock.getLLMSettings.mockResolvedValue(settings);
+    apiMock.updateLLMSettings.mockResolvedValue({ ...settings, model_name: candidate });
+    render(<Settings />);
+    const input = await screen.findByRole("combobox", { name: "Model" });
+    expect(effortOptions()).toEqual(["", "none", "low", "medium", "high", "max"]);
+    fireEvent.click(input);
+    expect(await screen.findByText(candidate)).toBeInTheDocument();
+    fireEvent.change(input, { target: { value: candidate } });
+    fireEvent.click(effortSelect().closest("form")!.querySelector('button[type="submit"]')!);
+    await waitFor(() => expect(apiMock.updateLLMSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: provider.name, model_name: candidate,
+        base_url: provider.default_base_url }),
+    ));
+    expect(apiMock.listLLMModels).not.toHaveBeenCalled();
+  });
+
+  it("honors registry discovery policy without guessing from the provider name", async () => {
+    apiMock.getLLMSettings.mockResolvedValue(llmSettings({
+      providers: providers.map((provider) => ({ ...provider, automatic_model_list: false })),
+    }));
+    render(<Settings />);
+    await screen.findByRole("combobox", { name: "Model" });
+    expect(apiMock.listLLMModels).not.toHaveBeenCalled();
   });
 
   it("loads the CLI model list on open and offers the selected model's levels", async () => {
@@ -170,18 +248,64 @@ describe("Settings with the claude-cli provider", () => {
     fireEvent.click(screen.getByRole("combobox", { name: "Model" }));
     expect(screen.queryByText("claude-sonnet-4-6")).not.toBeInTheDocument();
   });
+});
 
-  it("keeps the existing levels and makes no request for other providers", async () => {
-    apiMock.getLLMSettings.mockResolvedValue(
-      llmSettings({
-        provider: "openrouter",
-        model_name: "deepseek/deepseek-v3.2",
-        base_url: "https://openrouter.ai/api/v1",
-      }),
-    );
-    render(<Settings />);
 
-    await waitFor(() => expect(effortOptions()).toEqual(["", "none", "low", "medium", "high", "max"]));
-    expect(apiMock.listLLMModels).not.toHaveBeenCalled();
+describe("Settings with Codex OAuth discovery", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    apiMock.getDataSourceSettings.mockResolvedValue({});
+    apiMock.getLLMSettings.mockResolvedValue(llmSettings({
+      provider: "openai-codex", model_name: "openai-codex/saved-model",
+    }));
   });
+
+  it("automatically discovers account models, labels and model-specific efforts", async () => {
+    apiMock.listLLMModels.mockResolvedValue({
+      provider: "openai-codex", models: ["openai-codex/available"], source: "provider",
+      model_labels: {"openai-codex/available": "Available model"},
+      effort_levels: {"openai-codex/available": ["medium", "ultra"]},
+      default_effort_levels: {"openai-codex/available": "medium"},
+    });
+    render(<Settings />);
+    await waitFor(() => expect(apiMock.listLLMModels).toHaveBeenCalledWith(
+      expect.objectContaining({provider: "openai-codex", refresh: false}),
+    ));
+    expect(await screen.findByText("Loaded 1 available models.")).toBeInTheDocument();
+    const input = screen.getByRole("combobox", {name: "Model"});
+    expect(input).toHaveValue("openai-codex/saved-model");
+    fireEvent.click(input);
+    fireEvent.click(screen.getByRole("option", {name: /Available model/}));
+    expect(input).toHaveValue("openai-codex/available");
+    expect(effortOptions()).toEqual(["", "medium", "ultra"]);
+    expect(screen.getByText(/Provider default: Medium/)).toBeInTheDocument();
+  });
+
+  it("retains the saved model and manual entry after unavailable discovery", async () => {
+    apiMock.listLLMModels.mockResolvedValue({
+      provider: "openai-codex", models: ["openai-codex/gpt-6-sol"],
+      source: "default", warning_code: "model_list_unavailable",
+    });
+    render(<Settings />);
+    await waitFor(() => expect(apiMock.listLLMModels).toHaveBeenCalled());
+    const input = screen.getByRole("combobox", {name: "Model"});
+    expect(input).toHaveValue("openai-codex/saved-model");
+    fireEvent.change(input, {target: {value: "openai-codex/manual-model"}});
+    expect(input).toHaveValue("openai-codex/manual-model");
+  });
+});
+
+it("saves only the explicitly selected Gildata feature for an existing token", async () => {
+  const saved = { gildata_token_configured: true, gildata_features: [] };
+  apiMock.getLLMSettings.mockResolvedValue(llmSettings());
+  apiMock.getDataSourceSettings.mockResolvedValue(saved);
+  apiMock.updateDataSourceSettings.mockResolvedValue({ ...saved, gildata_features: ["fin_query"] });
+  render(<Settings />);
+  const query = await screen.findByRole("checkbox", { name: "Combined financial queries" });
+  expect(query).not.toBeChecked();
+  fireEvent.click(query);
+  fireEvent.click(screen.getByRole("button", { name: /save data source settings/i }));
+  await waitFor(() => expect(apiMock.updateDataSourceSettings).toHaveBeenCalledWith(
+    expect.objectContaining({ gildata_features: ["fin_query"] }),
+  ));
 });

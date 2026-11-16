@@ -2,12 +2,13 @@ import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Database, KeyRound, Loader2, RefreshCw, RotateCcw, Save, Server, SlidersHorizontal } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
+import { SoftwareUpdateSettings } from "@/components/settings/SoftwareUpdateSettings";
 import { ChannelSettings } from "@/components/settings/ChannelSettings";
 import { CustomProviderManager } from "@/components/settings/CustomProviderManager";
 import { ModelPicker } from "@/components/settings/ModelPicker";
-import { QVerisSettings } from "@/components/settings/QVerisSettings"; // QVERIS-INTEGRATION
+import { HistoryStorageSettings } from "@/components/settings/HistoryStorageSettings";
 import { SourcePrioritySettings } from "@/components/settings/SourcePrioritySettings";
-import { api, isAuthRequiredError, type DataSourceSettings, type LLMProviderOption, type LLMSettings } from "@/lib/api";
+import { api, gildataFeatures, type GildataFeature, isAuthRequiredError, type DataSourceSettings, type LLMProviderOption, type LLMSettings } from "@/lib/api";
 import { getApiAuthKey, setApiAuthKey } from "@/lib/apiAuth";
 import { effortLabelKey } from "@/lib/reasoningEffort";
 
@@ -49,10 +50,13 @@ export function Settings() {
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelListHint, setModelListHint] = useState<string | null>(null);
   const [effortLevelsByModel, setEffortLevelsByModel] = useState<Record<string, string[]> | null>(null);
+  const [modelLabels, setModelLabels] = useState<Record<string, string>>({});
+  const [defaultEffortsByModel, setDefaultEffortsByModel] = useState<Record<string, string>>({});
   const [localApiKey, setLocalApiKeyState] = useState(() => getApiAuthKey());
   const [clearApiKey, setClearApiKey] = useState(false);
   const [tushareToken, setTushareToken] = useState("");
   const [clearTushareToken, setClearTushareToken] = useState(false);
+  const [features, setFeatures] = useState<GildataFeature[]>([]);
   const [gildataToken, setGildataToken] = useState("");
   const [clearGildataToken, setClearGildataToken] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -76,6 +80,7 @@ export function Settings() {
           setModelOptions(Array.from(new Set([
             llmResult.value.model_name,
             llmResult.value.providers.find((provider) => provider.name === llmResult.value.provider)?.default_model ?? "",
+            ...(llmResult.value.providers.find((provider) => provider.name === llmResult.value.provider)?.model_options ?? []),
           ].filter(Boolean))));
         } else {
           const message = llmResult.reason instanceof Error
@@ -91,6 +96,7 @@ export function Settings() {
 
         if (dataSourceResult.status === "fulfilled") {
           setDataSettings(dataSourceResult.value);
+          setFeatures(dataSourceResult.value.gildata_features ?? []);
         } else {
           const message = dataSourceResult.reason instanceof Error
             ? dataSourceResult.reason.message
@@ -125,8 +131,11 @@ export function Settings() {
       model_name: provider.default_model,
       base_url: provider.default_base_url,
     });
-    setModelOptions([provider.default_model]);
+    setModelOptions(Array.from(new Set([provider.default_model, ...(provider.model_options ?? [])])));
     setModelListHint(null);
+    setEffortLevelsByModel(null);
+    setModelLabels({});
+    setDefaultEffortsByModel({});
   };
 
   const onProviderChange = (name: string) => {
@@ -140,9 +149,11 @@ export function Settings() {
     });
     setApiKey("");
     setClearApiKey(false);
-    setModelOptions([provider.default_model]);
+    setModelOptions(Array.from(new Set([provider.default_model, ...(provider.model_options ?? [])])));
     setModelListHint(null);
     setEffortLevelsByModel(null);
+    setModelLabels({});
+    setDefaultEffortsByModel({});
   };
 
   // The provider the form shows now; a model list answering for an earlier one
@@ -166,9 +177,12 @@ export function Settings() {
       setModelOptions(Array.from(new Set([
         form.model_name,
         selectedProvider.default_model,
+        ...(selectedProvider.model_options ?? []),
         ...result.models,
       ].filter(Boolean))));
       setEffortLevelsByModel(result.effort_levels ?? null);
+      setModelLabels(result.model_labels ?? {});
+      setDefaultEffortsByModel(result.default_effort_levels ?? {});
       const warningMessages = {
         oauth_discovery_unsupported: t("settings.modelDiscoveryOauthUnsupported"),
         api_key_required: t("settings.modelDiscoveryApiKeyRequired"),
@@ -189,12 +203,13 @@ export function Settings() {
 
   // The CLI reports which models the login can run and the levels each accepts,
   // so fetch that as soon as the provider is shown rather than on a button press.
-  const isClaudeCli = selectedProvider?.auth_type === "claude_cli";
+  const hasAutomaticModelList = selectedProvider?.automatic_model_list
+    ?? (selectedProvider?.auth_type === "claude_cli" || selectedProvider?.name === "openai-codex");
   useEffect(() => {
-    if (isClaudeCli) void refreshModels({ refresh: false });
+    if (hasAutomaticModelList) void refreshModels({ refresh: false });
     // refreshModels reads the form at call time; re-run only when the provider changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isClaudeCli]);
+  }, [hasAutomaticModelList, selectedProvider?.name]);
 
   // A model's own levels when the provider reports them, else the provider's.
   const visibleEffortLevels =
@@ -260,6 +275,7 @@ export function Settings() {
       const updated = await api.updateDataSourceSettings({
         tushare_token: isDesktop ? undefined : tushareToken.trim() || undefined,
         clear_tushare_token: isDesktop ? false : clearTushareToken,
+        gildata_features: features,
         gildata_token: isDesktop ? undefined : gildataToken.trim() || undefined,
         clear_gildata_token: isDesktop ? false : clearGildataToken,
       });
@@ -281,7 +297,7 @@ export function Settings() {
       setGildataToken("");
       setClearGildataToken(false);
       toast.success(t("settings.dataSourceSettingsSaved"));
-      if (desktop && (tushareToken.trim() || clearTushareToken)) {
+      if (desktop && (tushareToken.trim() || clearTushareToken || gildataToken.trim() || clearGildataToken)) {
         toast.info(t("settings.desktopCredentialRestarting"));
         await desktop.restartBackend();
       }
@@ -329,6 +345,16 @@ export function Settings() {
     </form>
   );
 
+  const partnerSection = (
+    <section className="rounded-lg border bg-card p-5">
+      <h2 className="text-lg font-semibold">{t("gildata.partner")}</h2>
+      <div className="mt-2 flex flex-wrap gap-4 text-sm text-primary underline">
+        <a href="https://www.gildata.com/products/datamap" target="_blank" rel="noreferrer">{t("gildata.website")}</a>
+        {dataSettings && <a href="#gildata-settings">{t("gildata.features")}</a>}
+      </div>
+    </section>
+  );
+
   if (loading || !form || !settings || !dataSettings) {
     return (
       <div className="mx-auto max-w-5xl space-y-6 p-6">
@@ -336,9 +362,9 @@ export function Settings() {
           <h1 className="text-2xl font-semibold tracking-tight">{t("settings.title")}</h1>
           <p className="max-w-3xl text-sm text-muted-foreground">{t("settings.subtitle")}</p>
         </div>
+        <SoftwareUpdateSettings />
         {!isDesktop && localApiAccessSection}
-        {/* QVERIS-INTEGRATION */}
-        <QVerisSettings />
+        {partnerSection}
         <div className="flex min-h-32 items-center justify-center rounded-lg border bg-card p-5 text-sm text-muted-foreground">
           {settingsLoadError ? (
             <div className="text-center">
@@ -381,10 +407,10 @@ export function Settings() {
         <p className="max-w-3xl text-sm text-muted-foreground">{t("settings.subtitle")}</p>
       </div>
 
+      <SoftwareUpdateSettings />
       {!isDesktop && localApiAccessSection}
 
-      {/* QVERIS-INTEGRATION */}
-      <QVerisSettings />
+      {partnerSection}
 
       <ChannelSettings />
 
@@ -393,7 +419,7 @@ export function Settings() {
         <p className="max-w-3xl text-sm text-muted-foreground">{t("settings.llmSettingsDesc")}</p>
       </div>
 
-      {/* Column ratio matches the QVeris and data-source sections so the
+      {/* Column ratio matches the data-source section so the
           card seams align down the page. */}
       <form onSubmit={submit} className="grid gap-5 lg:grid-cols-[minmax(0,1.1fr)_minmax(280px,0.9fr)]">
         <section className="rounded-lg border bg-card p-5 shadow-sm">
@@ -423,10 +449,11 @@ export function Settings() {
 
             <label className="grid gap-2">
               <span className={labelClass}>{t("settings.model")}</span>
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2">
                 <ModelPicker
                   value={form.model_name}
                   options={modelOptions}
+                  labels={modelLabels}
                   onChange={(modelName) => setForm({ ...form, model_name: modelName })}
                   ariaLabel={t("settings.model")}
                   optionsAriaLabel={t("settings.modelOptions")}
@@ -579,6 +606,14 @@ export function Settings() {
                 })}
               </select>
               <span className={hintClass}>{t("settings.reasoningEffortDesc")}</span>
+              {form.provider === "openai-codex" && defaultEffortsByModel[form.model_name] && (
+                <span className={hintClass}>
+                  {t("settings.providerDefault")}:
+                  {" "}{effortLabelKey(defaultEffortsByModel[form.model_name])
+                    ? t(effortLabelKey(defaultEffortsByModel[form.model_name])!)
+                    : defaultEffortsByModel[form.model_name]}
+                </span>
+              )}
               {unsupportedEffort && (
                 <span className={hintClass}>
                   {t("settings.reasoningEffortReset", {
@@ -672,7 +707,7 @@ export function Settings() {
               <div className="flex items-start justify-between gap-3">
                 <span className={hintClass}>
                   {t("settings.gildataTokenDesc", {
-                    defaultValue: "Optional Gildata (Hundsun Juyuan) A-share feed. When set, it joins the tail of the A-share fallback chain.",
+                    defaultValue: "Optional Gildata data credentials.",
                   })}
                 </span>
                 <label className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
@@ -690,6 +725,16 @@ export function Settings() {
               </div>
             </label>
 
+            <fieldset id="gildata-settings" disabled={dataSaving} className="grid gap-2 rounded-md border p-3">
+              <legend className="px-1 text-sm font-medium">{t("gildata.features")}</legend>
+              <p className="text-sm text-muted-foreground">{t("gildata.optInHelp")}</p>
+              {gildataFeatures.map(feature => <label key={feature} className="flex items-center gap-2 text-sm">
+                <input type="checkbox" checked={features.includes(feature)}
+                  onChange={event => setFeatures(event.target.checked
+                    ? [...features, feature] : features.filter(item => item !== feature))} />
+                {t(`gildata.${feature}`)}
+              </label>)}
+            </fieldset>
             <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
               <span className="font-medium text-foreground">{t("settings.saved")}: </span>
               <span className="break-all font-mono">{dataSettings.env_path}</span>
@@ -725,6 +770,7 @@ export function Settings() {
       </form>
 
       <SourcePrioritySettings />
+      <HistoryStorageSettings />
     </div>
   );
 }

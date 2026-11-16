@@ -14,7 +14,7 @@ import pytest
 import api_server  # noqa: F401
 from src.api import settings_routes
 from src.providers import claude_cli
-from src.providers.capabilities import get_provider_capabilities
+from src.providers.registry import get_provider_capabilities
 from src.providers.chat import ChatLLM
 from src.swarm.models import public_provider_metadata
 from tests.claude_cli_helpers import install_fake_cli, payload, tool, use_provider
@@ -49,24 +49,26 @@ def test_claude_cli_label_survives_public_run_metadata() -> None:
     assert public_provider_metadata("claude-cli") == "claude-cli"
 
 
-def test_sync_provider_env_clears_openai_transport(monkeypatch) -> None:
-    import src.providers.llm as llm
+def test_cli_config_does_not_use_or_destroy_openai_credentials(monkeypatch) -> None:
+    from src.providers.settings import _sync_provider_env
 
     use_provider(monkeypatch)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-should-be-removed")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://example.invalid/v1")
-    llm._sync_provider_env()
+    _sync_provider_env()
     import os
 
-    assert "OPENAI_API_KEY" not in os.environ
-    assert "OPENAI_BASE_URL" not in os.environ
+    from src.providers.settings import resolve_config
+    assert resolve_config().api_key == ""
+    assert os.environ["OPENAI_API_KEY"] == "sk-should-be-removed"
+    assert os.environ["OPENAI_BASE_URL"] == "https://example.invalid/v1"
 
 
 def test_build_llm_returns_cli_wrapper(monkeypatch) -> None:
-    import src.providers.llm as llm
+    from src.providers.llm import build_llm
 
     use_provider(monkeypatch)
-    model = llm.build_llm()
+    model = build_llm()
     assert isinstance(model, claude_cli.ClaudeCliLLM)
     assert model.model == "claude-opus-5-5"
 
@@ -130,9 +132,10 @@ def test_final_without_content_is_fed_back_and_retried(fake_cli) -> None:
 
     assert message.content == "order 42 cancelled"
     assert "no tool calls and no content" in calls()[1]["stdin"]
-    # input_tokens is the last prompt's size (what the context meter reads);
-    # output_tokens is what both attempts generated.
-    assert message.usage_metadata["input_tokens"] == 10
+    # Billing includes both attempts, while compaction sees the last prompt.
+    assert message.usage_metadata["input_tokens"] == 20
+    assert message.usage_metadata["context_input_tokens"] == 10
+    assert message.usage_metadata["calls"] == 2
     assert message.usage_metadata["output_tokens"] == 10
 
 
@@ -504,15 +507,15 @@ def test_settings_report_cli_login(monkeypatch) -> None:
 
 
 def test_preflight_uses_cli_login(monkeypatch) -> None:
-    import src.providers.llm as llm
+    from src.providers import settings, llm as llm_module
     from src import preflight
 
     monkeypatch.setenv("LANGCHAIN_PROVIDER", "claude-cli")
     monkeypatch.setenv("LANGCHAIN_MODEL_NAME", "claude-opus-5-5")
-    monkeypatch.setattr(llm, "_ensure_dotenv", lambda: None)
-    monkeypatch.setattr(llm, "_sync_provider_env", lambda: None)
+    monkeypatch.setattr(settings, "_ensure_dotenv", lambda: None)
+    monkeypatch.setattr(settings, "_sync_provider_env", lambda: None)
     monkeypatch.setattr(
-        llm,
+        llm_module,
         "provider_diagnostics",
         lambda: {"base_url": "", "timeout_seconds": 120, "max_retries": 2, "proxy": {}},
     )
@@ -524,3 +527,76 @@ def test_preflight_uses_cli_login(monkeypatch) -> None:
 
     assert result.status == "not_configured"
     assert "claude auth login" in result.impact
+
+
+def test_usage_preserves_cache_split_as_input_token_details() -> None:
+    result = claude_cli._usage({
+        "usage": {
+            "input_tokens": 10,
+            "cache_creation_input_tokens": 5,
+            "cache_read_input_tokens": 20,
+            "output_tokens": 3,
+        },
+    })
+    assert result == {
+        "input_tokens": 35,
+        "output_tokens": 3,
+        "total_tokens": 38,
+        "input_token_details": {"cache_read": 20, "cache_creation": 5},
+    }
+
+
+def test_usage_omits_details_when_no_cache() -> None:
+    result = claude_cli._usage({
+        "usage": {"input_tokens": 10, "output_tokens": 3},
+    })
+    assert result == {
+        "input_tokens": 10,
+        "output_tokens": 3,
+        "total_tokens": 13,
+    }
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_retry_details_reach_persisted_usage(fake_cli, monkeypatch, tmp_path, streaming):
+    from src.agent.llm_usage import _new_llm_usage_summary, _record_llm_usage
+    set_replies, _ = fake_cli
+    replies = []
+    for content, tokens in [("", 10), ("done", 20)]:
+        reply = payload({"action": "final", "content": content})
+        reply["usage"] = {"input_tokens": tokens, "output_tokens": 3,
+                          "cache_creation_input_tokens": 5, "cache_read_input_tokens": 7}
+        replies.append({"payload": reply})
+    set_replies(*replies)
+    use_provider(monkeypatch)
+    client = ChatLLM()
+    response = (client.stream_chat if streaming else client.chat)([{"role": "user", "content": "hi"}])
+    usage = response.usage_metadata
+    assert usage["input_tokens"] == 54
+    assert usage["context_input_tokens"] == 32
+    summary = _new_llm_usage_summary(client)
+    _record_llm_usage(tmp_path, summary, usage, 1)
+    saved = json.loads((tmp_path / "llm_usage.json").read_text())
+    assert saved["totals"] == {"input_tokens": 54, "output_tokens": 6,
+        "total_tokens": 60, "calls": 2, "cache_read_tokens": 14, "cache_creation_tokens": 10}
+
+
+def test_cache_creation_total_is_not_added_to_its_breakdown():
+    usage = claude_cli._usage({"usage": {"input_tokens": 10,
+        "cache_creation_input_tokens": 5, "ephemeral_5m_input_tokens": 5,
+        "cache_creation": {"ephemeral_5m_input_tokens": 5}}})
+    assert usage["input_tokens"] == 15
+    assert usage["input_token_details"]["cache_creation"] == 5
+
+
+def test_exhausted_feedback_retries_keep_their_paid_usage(fake_cli, monkeypatch):
+    set_replies, _ = fake_cli
+    set_replies(*[{"payload": payload({"action": "final", "content": ""})}
+                  for _ in range(claude_cli._MAX_RETRIES + 1)])
+    use_provider(monkeypatch)
+    with pytest.raises(Exception, match="without content") as failure:
+        ChatLLM().stream_chat([{"role": "user", "content": "hi"}])
+    usage = failure.value.usage_metadata
+    assert usage["calls"] == 4
+    assert usage["input_tokens"] == 40
+    assert usage["output_tokens"] == 20

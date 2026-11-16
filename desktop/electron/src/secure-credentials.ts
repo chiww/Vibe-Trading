@@ -9,27 +9,12 @@ type CredentialFile = {
   values: Record<string, string>;
 };
 
+// Bundled from agent/src/providers/llm_providers.json by copy-static.mjs.
+const providers: { api_key_env?: string | null }[] = require("./llm_providers.json");
 const ENV_CREDENTIALS = new Set([
-  "OPENROUTER_API_KEY",
-  "OPENAI_API_KEY",
-  "ANTHROPIC_API_KEY",
-  "DEEPSEEK_API_KEY",
-  "SILICONFLOW_API_KEY",
-  "SILICONFLOW_GLOBAL_API_KEY",
-  "NVIDIA_API_KEY",
-  "GEMINI_API_KEY",
-  "GROQ_API_KEY",
-  "DASHSCOPE_API_KEY",
-  "ZHIPU_API_KEY",
-  "MOONSHOT_API_KEY",
-  "KIMI_CODING_API_KEY",
-  "MINIMAX_API_KEY",
-  "MIMO_API_KEY",
-  "MODELSCOPE_API_KEY",
-  "SPARK_API_KEY",
-  "ZAI_API_KEY",
+  ...providers.flatMap((provider) => provider.api_key_env ? [provider.api_key_env] : []),
   "TUSHARE_TOKEN",
-  "QVERIS_API_KEY",
+  "GILDATA_TOKEN",
 ]);
 
 const PLACEHOLDER_VALUES = new Set([
@@ -40,6 +25,7 @@ const PLACEHOLDER_VALUES = new Set([
   "xxx",
   "gsk_xxx",
   "your-tushare-token",
+  "your-gildata-token",
 ]);
 
 export type CredentialStatus = {
@@ -86,12 +72,9 @@ export class SecureCredentialStore {
       throw new Error(this.messages.credentialEncryptionUnavailable);
     }
     await this.load();
+    // Verify existing ciphertext before removing any plaintext migration source.
+    this.environment();
     await this.migrateDotenv(path.join(this.homeDirectory, ".vibe-trading", ".env"));
-    await this.migrateJsonField(
-      path.join(this.homeDirectory, ".vibe-trading", "qveris.json"),
-      "api_key",
-      "QVERIS_API_KEY",
-    );
   }
 
   status(): CredentialStatus {
@@ -123,11 +106,7 @@ export class SecureCredentialStore {
   }
 
   private decrypt(name: string): string {
-    try {
-      return safeStorage.decryptString(Buffer.from(this.values[name], "base64"));
-    } catch {
-      return "";
-    }
+    return safeStorage.decryptString(Buffer.from(this.values[name], "base64"));
   }
 
   private assertAllowed(name: string): void {
@@ -195,28 +174,6 @@ export class SecureCredentialStore {
     }
   }
 
-  private async migrateJsonField(
-    filePath: string,
-    field: string,
-    credential: string,
-  ): Promise<void> {
-    try {
-      const parsed = JSON.parse(await fs.readFile(filePath, "utf8")) as Record<string, unknown>;
-      const value = typeof parsed[field] === "string" ? parsed[field].trim() : "";
-      if (!value) return;
-      if (!this.values[credential]) {
-        this.values[credential] = safeStorage.encryptString(value).toString("base64");
-        this.migrated.push(credential);
-        await this.persist();
-      }
-      delete parsed[field];
-      await atomicTextWrite(filePath, `${JSON.stringify(parsed, null, 2)}\n`);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT" && !(error instanceof SyntaxError)) {
-        throw error;
-      }
-    }
-  }
 }
 
 function unquote(value: string): string {

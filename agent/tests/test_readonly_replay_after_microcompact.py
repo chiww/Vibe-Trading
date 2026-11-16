@@ -94,7 +94,7 @@ def _loop(registry=None):
     loop._readonly_replay_protected = set()
     loop._readonly_replay_visibility_pending = set()
     loop._readonly_replay_recoveries = 0
-    loop._grounding = None
+    loop._identity = None
     loop._cancel_event = threading.Event()
     loop._event_callback = None
     loop._tool_progress = ToolProgress()
@@ -523,7 +523,7 @@ def test_a_write_makes_earlier_readonly_results_unreplayable() -> None:
     read = {"factor_csv": "factor.csv"}
     loop._process_tool_calls([SimpleNamespace(name="factor_analysis", arguments=read, id="f1")], _Context(), [], _Trace(), [], 1)
     loop._process_tool_calls(
-        [SimpleNamespace(name="bash", arguments={"command": "python make_factor.py > factor.csv"}, id="w1")],
+        [SimpleNamespace(name="bash", arguments={"command": "python make_factor.py"}, id="w1")],
         _Context(), [], _Trace(), [], 2,
     )
     assert loop._readonly_replay_visibility_pending == set()

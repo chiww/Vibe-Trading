@@ -45,12 +45,16 @@ KNOWN_MUTATING_MCP_TOOLS = frozenset(
         "add_goal_evidence",
         "alpha_bench",
         "backtest",
+        # Writes only saved research jobs and sandbox backtest artifacts;
+        # request actions cannot place or cancel broker orders.
+        "research_lab",
         "refresh_strategy_evidence",
         "adapt_strategy",
         "run_swarm",
         "start_research_goal",
         "trading_select_connection",
         "update_research_goal_status",
+        "update_research_goal",
         "write_file",
     }
 )

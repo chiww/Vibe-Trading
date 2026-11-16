@@ -202,6 +202,7 @@ class TestEnvConfigDefaults:
         assert c.agent_tuning.vibe_trading_disable_bottleneck is False
         assert c.agent_tuning.vibe_trading_bench_workers == 0
         assert c.agent_tuning.vibe_trading_search_backends == ""
+        assert c.agent_tuning.vibe_trading_search_parallel is False
         assert c.agent_tuning.vibe_trading_search_bing_fallback is True
 
     def test_path_defaults(self) -> None:
@@ -246,7 +247,7 @@ class TestEnvConfigTypeCoercion:
     def test_invalid_optional_int_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch, value: str) -> None:
         monkeypatch.setenv("ANTHROPIC_MAX_TOKENS", value)
         c = EnvConfig()
-        assert c.llm.anthropic_max_tokens is None
+        assert c.llm.anthropic_max_tokens == 16384
 
     def test_valid_optional_int_is_coerced(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("ANTHROPIC_MAX_TOKENS", "4096")

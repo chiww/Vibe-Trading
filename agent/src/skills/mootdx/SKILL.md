@@ -16,22 +16,20 @@ description: Mootdx A-share market data via TCP-direct 通达信 servers. RETIRE
 Mootdx talks the native 通达信 (TDX) binary protocol over TCP, bypassing the HTTP scrapers that periodically fail under load (akshare → East Money is the canonical example). Public market data only — no token, no per-IP throttling, no captcha.
 
 - GitHub: https://github.com/mootdx/mootdx
-- Install: `pip install mootdx && pip install 'httpx>=0.28.1'`
+- Legacy SDK installation (not needed for automatic A-share data): `pip install mootdx && pip install 'httpx>=0.28.1'`
 
 > Mootdx pins `httpx<0.26` in `setup.py`, but only uses basic `httpx.Client/get` APIs that are forward-compatible. The second `pip install` restores the modern httpx that the rest of Vibe-Trading (MCP server, fastmcp) needs.
 
 ## Quick Start
 
 ```python
-from mootdx.quotes import Quotes
+from backtest.loaders.registry import get_loader_cls_with_fallback
 
-client = Quotes.factory(market="std")  # std = 沪/深/京; ext = 期货/期权 (upstream-broken)
-
-# Daily OHLCV with a date range (preferred API).
-df = client.get_k_data(code="000001", start_date="2025-01-01", end_date="2025-02-01")
-
-# Intraday — offset-from-latest only, no native date range.
-df_15m = client.bars(symbol="600519", frequency=1, offset=800)
+# Explicit source only; the registered loader acquires through the gateway.
+loader = get_loader_cls_with_fallback("mootdx")()
+daily = loader.fetch(["000001.SZ"], "2025-01-01", "2025-02-01", interval="1D")
+intraday = loader.fetch(["600519.SH"], "2026-11-12", "2026-11-13", interval="15m")
+# These are normalized project frames. Vendor column names are documented below.
 ```
 
 ## Frequency Codes
@@ -78,7 +76,7 @@ df_15m = client.bars(symbol="600519", frequency=1, offset=800)
 
 ## Built-in Loader
 
-`backtest/loaders/mootdx_loader.py` is registered as the `mootdx` source. Fallback chain for `a_share` is `[tushare, mootdx, akshare]` — tushare wins when a token is present; mootdx wins when no token but TCP egress works; akshare is the broadest fallback.
+`backtest/loaders/mootdx_loader.py` remains registered for explicit `source="mootdx"` calls. It is not in the automatic `a_share` fallback chain. The default chain is `tencent → eastmoney → baostock → yahoo → akshare → tushare → local`, with unavailable loaders skipped. Tencent and AKShare ship in the base install; BaoStock requires the optional `vibe-trading-ai[ashare]` extra. Neither the base install nor that extra includes mootdx.
 
 ```python
 from backtest.runner import run

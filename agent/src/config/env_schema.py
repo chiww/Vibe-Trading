@@ -171,7 +171,9 @@ class LLMConfig(_EnvBase):
     langchain_max_tokens: int | None = Field(
         alias="LANGCHAIN_MAX_TOKENS", default=None, gt=0
     )
-    anthropic_max_tokens: int | None = Field(alias="ANTHROPIC_MAX_TOKENS", default=None, gt=0)
+    # Use an explicit, configurable output budget so unknown proxy aliases do
+    # not silently inherit the adapter's 4096-token fallback (including thinking).
+    anthropic_max_tokens: int | None = Field(alias="ANTHROPIC_MAX_TOKENS", default=16384, gt=0)
     timeout_seconds: int = Field(alias="TIMEOUT_SECONDS", default=120)
     max_retries: int = Field(alias="MAX_RETRIES", default=2)
     langchain_reasoning_effort: str = Field(alias="LANGCHAIN_REASONING_EFFORT", default="")
@@ -185,6 +187,12 @@ class LLMConfig(_EnvBase):
         default="https://chatgpt.com/backend-api/codex/responses",
     )
     claude_cli_path: str = Field(alias="CLAUDE_CLI_PATH", default="")
+    vibe_trading_deny_tool_prefixes: str | None = Field(
+        alias="VIBE_TRADING_DENY_TOOL_PREFIXES", default=None
+    )
+    vibe_trading_bash_policy: str | None = Field(
+        alias="VIBE_TRADING_BASH_POLICY", default=None
+    )
     # A convenience filter, not a security boundary: live orders are still bound
     # by the mandate gate whatever this list hides.
     claude_cli_deny_tool_prefixes: str = Field(
@@ -224,6 +232,7 @@ class DataConfig(_EnvBase):
     alphavantage_api_key: str = Field(alias="ALPHAVANTAGE_API_KEY", default="")
     tiingo_api_key: str = Field(alias="TIINGO_API_KEY", default="")
     fmp_api_key: str = Field(alias="FMP_API_KEY", default="")
+    gildata_features: str = Field(alias="VIBE_TRADING_GILDATA_FEATURES", default="")
     gildata_token: str = Field(alias="GILDATA_TOKEN", default="")
     gildata_base_url: str = Field(
         alias="GILDATA_BASE_URL",
@@ -272,8 +281,6 @@ class DataConfig(_EnvBase):
     vibe_trading_data_cache: EnvBool = Field(alias="VIBE_TRADING_DATA_CACHE", default=False)
     vibe_trading_data_cache_root: str = Field(alias="VIBE_TRADING_DATA_CACHE_ROOT", default="")
     aliyun_iqs_api_key: str = Field(alias="ALIYUN_IQS_API_KEY", default="")
-    qveris_api_key: str = Field(alias="QVERIS_API_KEY", default="")
-    qveris_base_url: str = Field(alias="QVERIS_BASE_URL", default="")
     tickerall_api_key: str = Field(alias="TICKERALL_API_KEY", default="")
     tickerall_account_id: str = Field(alias="TICKERALL_ACCOUNT_ID", default="")
     tickerall_base_url: str = Field(alias="TICKERALL_BASE_URL", default="")
@@ -294,6 +301,7 @@ class DataConfig(_EnvBase):
     market_data_order_hk_equity: str = Field(alias="MARKET_DATA_ORDER_HK_EQUITY", default="")
     market_data_order_india_equity: str = Field(alias="MARKET_DATA_ORDER_INDIA_EQUITY", default="")
     market_data_order_kr_equity: str = Field(alias="MARKET_DATA_ORDER_KR_EQUITY", default="")
+    market_data_order_jp_equity: str = Field(alias="MARKET_DATA_ORDER_JP_EQUITY", default="")
     market_data_order_ca_equity: str = Field(alias="MARKET_DATA_ORDER_CA_EQUITY", default="")
     market_data_order_ar_equity: str = Field(alias="MARKET_DATA_ORDER_AR_EQUITY", default="")
     market_data_order_br_equity: str = Field(alias="MARKET_DATA_ORDER_BR_EQUITY", default="")
@@ -533,6 +541,9 @@ class AgentTuningConfig(_EnvBase):
     )
     vibe_trading_bench_workers: int = Field(alias="VIBE_TRADING_BENCH_WORKERS", default=0)
     vibe_trading_search_backends: str = Field(alias="VIBE_TRADING_SEARCH_BACKENDS", default="")
+    vibe_trading_search_parallel: EnvBool = Field(
+        alias="VIBE_TRADING_SEARCH_PARALLEL", default=False,
+    )
     vibe_trading_slash_arg_max: int = Field(alias="VIBE_TRADING_SLASH_ARG_MAX", default=600)
     vibe_trading_search_bing_fallback: EnvBool = Field(
         alias="VIBE_TRADING_SEARCH_BING_FALLBACK", default=True,
@@ -565,6 +576,9 @@ class PathConfig(_EnvBase):
 
     vibe_trading_hypotheses_path: str = Field(alias="VIBE_TRADING_HYPOTHESES_PATH", default="")
     vibe_trading_goal_db_path: str = Field(alias="VIBE_TRADING_GOAL_DB_PATH", default="")
+    vibe_trading_research_artifact_db_path: str = Field(
+        alias="VIBE_TRADING_RESEARCH_ARTIFACT_DB_PATH", default="",
+    )
     vibe_trading_playbook_dir: str = Field(alias="VIBE_TRADING_PLAYBOOK_DIR", default="")
     vibe_trading_swarm_agent_config: str = Field(
         alias="VIBE_TRADING_SWARM_AGENT_CONFIG", default="",

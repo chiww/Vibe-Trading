@@ -8,18 +8,17 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import logging
-import json
 import os
 import sys as _sys
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional
-from urllib.parse import urlsplit
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
-import httpx
 from fastapi import Depends, FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
 
-from src.config.accessor import get_env_value, reset_env_config
+from src.config.accessor import reset_env_config
+from src.config.gildata_features import FEATURES_ENV, GildataFeature, selected_features
+from src.providers.settings import SettingsStore
 
 logger = logging.getLogger(__name__)
 
@@ -28,32 +27,28 @@ _AGENT_DIR = Path(__file__).resolve().parent.parent.parent
 
 
 # ---------------------------------------------------------------------------
-# Pydantic models (defined locally -- NO shared modules, per maintainer rule)
+# HTTP request/response models; provider metadata and discovery are shared
 # ---------------------------------------------------------------------------
 
 
 # "none" is an explicit value direct OpenAI needs to allow function tools on
 # gpt-5.6-* models; a provider with its own levels lists them in llm_providers.json.
-DEFAULT_REASONING_EFFORTS = ("none", "low", "medium", "high", "max")
-
-
-class LLMProviderOption(BaseModel):
-    """Supported LLM provider metadata for the settings UI."""
-
-    name: str
-    label: str
-    api_key_env: Optional[str] = None
-    base_url_env: str
-    default_model: str
-    model_options: List[str] = Field(default_factory=list)
-    default_base_url: str
-    base_url_options: List[str] = Field(default_factory=list)
-    api_key_required: bool = True
-    auth_type: str = "api_key"
-    login_command: Optional[str] = None
-    # Levels the settings form offers and the update route accepts; "" (unset)
-    # is always allowed on top of these.
-    reasoning_efforts: List[str] = Field(default_factory=lambda: list(DEFAULT_REASONING_EFFORTS))
+from src.providers.discovery import (
+    LLMModelsResponse as LLMModelsResponse,
+)
+from src.providers.discovery import (
+    LLMProviderOption as LLMProviderOption,
+)
+from src.providers.discovery import (
+    _extract_model_ids as _extract_model_ids,
+)
+from src.providers.discovery import (
+    _list_claude_cli_models,
+    _list_openai_codex_models,
+    _list_provider_models,
+    _validate_model_base_url,
+)
+from src.providers.registry import CATALOG_PATH, provider_catalog
 
 
 class LLMSettingsResponse(BaseModel):
@@ -98,25 +93,6 @@ class ListLLMModelsRequest(BaseModel):
     refresh: bool = False
 
 
-ModelDiscoveryWarningCode = Literal[
-    "oauth_discovery_unsupported",
-    "api_key_required",
-    "model_list_unavailable",
-]
-
-
-class LLMModelsResponse(BaseModel):
-    """Model IDs suitable for an editable settings combobox."""
-
-    provider: str
-    models: List[str]
-    source: str
-    warning_code: Optional[ModelDiscoveryWarningCode] = None
-    # Model id -> reasoning effort levels it accepts; an empty list means the
-    # model takes no effort setting. Only providers that report it fill this.
-    effort_levels: Optional[Dict[str, List[str]]] = None
-
-
 class SourceOrderEntry(BaseModel):
     """One market's fallback-chain order (default + override state)."""
 
@@ -140,6 +116,7 @@ class DataSourceSettingsResponse(BaseModel):
 
     tushare_token_configured: bool
     tushare_token_hint: Optional[str] = None
+    gildata_features: list[GildataFeature] = Field(default_factory=list)
     gildata_token_configured: bool
     gildata_token_hint: Optional[str] = None
     baostock_supported: bool
@@ -155,6 +132,7 @@ class UpdateDataSourceSettingsRequest(BaseModel):
     tushare_token: Optional[str] = None
     clear_tushare_token: bool = False
     gildata_token: Optional[str] = None
+    gildata_features: list[GildataFeature] | None = None
     clear_gildata_token: bool = False
     source_orders: Optional[List[SourceOrderUpdate]] = None
 
@@ -163,25 +141,12 @@ class UpdateDataSourceSettingsRequest(BaseModel):
 # Provider metadata (settings-exclusive)
 # ---------------------------------------------------------------------------
 
-LLM_PROVIDER_CONFIG_PATH = _AGENT_DIR / "src" / "providers" / "llm_providers.json"
+LLM_PROVIDER_CONFIG_PATH = CATALOG_PATH
 
 
 def _load_llm_providers() -> List[LLMProviderOption]:
-    """Load provider metadata from JSON so additions stay data-driven."""
-    try:
-        raw = json.loads(LLM_PROVIDER_CONFIG_PATH.read_text(encoding="utf-8"))
-        providers = [LLMProviderOption(**item) for item in raw]
-    except Exception as exc:
-        raise RuntimeError(f"Failed to load LLM provider config: {LLM_PROVIDER_CONFIG_PATH}") from exc
-
-    seen: set[str] = set()
-    for provider in providers:
-        if provider.name in seen:
-            raise RuntimeError(f"Duplicate LLM provider name: {provider.name}")
-        seen.add(provider.name)
-    if not providers:
-        raise RuntimeError("LLM provider config must not be empty")
-    return providers
+    """Expose the same catalog used by the in-process gateway and CLI."""
+    return [LLMProviderOption(**item) for item in provider_catalog()]
 
 
 LLM_PROVIDERS = _load_llm_providers()
@@ -189,19 +154,6 @@ LLM_PROVIDER_BY_NAME = {provider.name: provider for provider in LLM_PROVIDERS}
 LLM_API_KEY_PLACEHOLDERS = {"", "sk-or-v1-your-key-here", "sk-xxx", "xxx", "gsk_xxx"}
 TUSHARE_TOKEN_PLACEHOLDERS = {"", "your-tushare-token"}
 GILDATA_TOKEN_PLACEHOLDERS = {"", "your-gildata-token"}
-
-
-def _desktop_secure_credential_names() -> set[str]:
-    """Return secrets owned by the desktop host when secure storage is active."""
-    names = {"TUSHARE_TOKEN", "QVERIS_API_KEY", "GILDATA_TOKEN"}
-    names.update(
-        provider.api_key_env for provider in LLM_PROVIDERS if provider.api_key_env
-    )
-    return names
-
-
-def _desktop_secure_credentials_enabled() -> bool:
-    return get_env_value("VIBE_TRADING_DESKTOP_SECURE_CREDENTIALS") == "1"
 
 
 # ---------------------------------------------------------------------------
@@ -238,175 +190,9 @@ def _baostock_installed() -> bool:
     return importlib.util.find_spec("baostock") is not None
 
 
-def _read_settings_env_values() -> Dict[str, str]:
-    """Read settings without creating a dotenv file.
-
-    Prefer the canonical user config, then the legacy package-local config.
-    If neither exists, use ``agent/.env.example`` for display defaults only.
-    """
+def _settings_store() -> SettingsStore:
     host = _host()
-    env_path = host.ENV_PATH
-    legacy_env_path = getattr(host, "LEGACY_ENV_PATH", _AGENT_DIR / ".env")
-    env_example_path = host.ENV_EXAMPLE_PATH
-    read_env = host._read_env_values
-    if env_path.exists():
-        values = read_env(env_path)
-    elif legacy_env_path.exists():
-        values = read_env(legacy_env_path)
-    elif env_example_path.exists():
-        values = read_env(env_example_path)
-    else:
-        values = {}
-
-    if _desktop_secure_credentials_enabled():
-        for name in _desktop_secure_credential_names():
-            runtime_value = get_env_value(name)
-            if runtime_value:
-                values[name] = runtime_value
-            else:
-                values.pop(name, None)
-    return values
-
-
-def _model_list_url(base_url: str) -> str:
-    """Return the OpenAI-compatible model-list endpoint for a provider URL."""
-    url = base_url.strip().rstrip("/")
-    for suffix in ("/chat/completions", "/responses"):
-        if url.endswith(suffix):
-            url = url[: -len(suffix)]
-            break
-    return f"{url}/models"
-
-
-def _validate_model_base_url(base_url: str) -> str:
-    """Accept HTTP(S) provider endpoints without embedded URL credentials."""
-    normalized = base_url.strip().rstrip("/")
-    parsed = urlsplit(normalized)
-    if (
-        parsed.scheme not in {"http", "https"}
-        or not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-    ):
-        raise ValueError("Provider base URL must be an HTTP(S) URL without embedded credentials")
-    return normalized
-
-
-def _extract_model_ids(payload: Any) -> List[str]:
-    """Normalize common OpenAI-compatible model-list response shapes."""
-    if not isinstance(payload, dict):
-        return []
-    records = payload.get("data")
-    if not isinstance(records, list):
-        records = payload.get("models")
-    if not isinstance(records, list):
-        return []
-
-    model_ids: set[str] = set()
-    for item in records:
-        if isinstance(item, str):
-            model_id = item.strip()
-        elif isinstance(item, dict):
-            model_id = str(item.get("id") or item.get("name") or "").strip()
-        else:
-            continue
-        if model_id:
-            model_ids.add(model_id)
-    return sorted(model_ids, key=str.casefold)[:1000]
-
-
-async def _list_provider_models(
-    provider: LLMProviderOption,
-    *,
-    base_url: str,
-    api_key: str,
-) -> LLMModelsResponse:
-    """Best-effort live model discovery with a safe editable fallback."""
-    fallback = [provider.default_model]
-    # Keep the direct MiniMax picker curated. Saved/custom model names remain
-    # editable, and custom endpoints retain their own live model discovery.
-    if provider.name == "minimax" and base_url.rstrip("/") in provider.base_url_options:
-        return LLMModelsResponse(
-            provider=provider.name,
-            models=provider.model_options or fallback,
-            source="default",
-        )
-    if provider.auth_type in {"oauth", "gh_cli"}:
-        return LLMModelsResponse(
-            provider=provider.name,
-            models=fallback,
-            source="default",
-            warning_code="oauth_discovery_unsupported",
-        )
-    if provider.api_key_required and not api_key:
-        return LLMModelsResponse(
-            provider=provider.name,
-            models=fallback,
-            source="default",
-            warning_code="api_key_required",
-        )
-
-    if provider.name == "ollama" and not base_url.rstrip("/").endswith("/v1"):
-        base_url = f"{base_url.rstrip('/')}/v1"
-
-    headers = {"Accept": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    try:
-        async with httpx.AsyncClient(timeout=12.0, follow_redirects=False) as client:
-            response = await client.get(_model_list_url(base_url), headers=headers)
-            response.raise_for_status()
-            models = _extract_model_ids(response.json())
-    except (httpx.HTTPError, ValueError):
-        return LLMModelsResponse(
-            provider=provider.name,
-            models=fallback,
-            source="default",
-            warning_code="model_list_unavailable",
-        )
-
-    # Prefer configured recommendations without deleting discovered routes.
-    # Paid variants, legacy models and future releases remain selectable.
-    official_endpoints = {provider.default_base_url, *provider.base_url_options}
-    if base_url.rstrip("/") in official_endpoints:
-        preferred = [model for model in provider.model_options if model in models]
-        models = preferred + [model for model in models if model not in preferred]
-
-    discovered = bool(models)
-    if provider.default_model not in models:
-        models.insert(0, provider.default_model)
-    return LLMModelsResponse(
-        provider=provider.name,
-        models=models or fallback,
-        source="provider" if discovered else "default",
-    )
-
-
-async def _list_claude_cli_models(
-    provider: LLMProviderOption, *, refresh: bool
-) -> LLMModelsResponse:
-    """List the models the local Claude Code login can run, with their effort levels."""
-    from src.providers.claude_cli_models import list_claude_cli_models
-
-    try:
-        discovered = await asyncio.to_thread(list_claude_cli_models, refresh=refresh)
-    except RuntimeError as exc:
-        logger.warning("claude-cli model list unavailable: %s", exc)
-        return LLMModelsResponse(
-            provider=provider.name,
-            models=[provider.default_model],
-            source="default",
-            warning_code="model_list_unavailable",
-        )
-    models = [model.model_id for model in discovered]
-    if provider.default_model not in models:
-        models.insert(0, provider.default_model)
-    return LLMModelsResponse(
-        provider=provider.name,
-        models=models,
-        source="provider",
-        effort_levels={model.model_id: list(model.effort_levels) for model in discovered},
-    )
+    return SettingsStore(host.ENV_PATH, getattr(host, "LEGACY_ENV_PATH", _AGENT_DIR / ".env"), host.ENV_EXAMPLE_PATH)
 
 
 # ---------------------------------------------------------------------------
@@ -419,7 +205,7 @@ def _build_llm_settings_response(
 ) -> LLMSettingsResponse:
     """Build the public settings payload from dotenv values."""
     host = _host()
-    env_values = values if values is not None else _read_settings_env_values()
+    env_values = values if values is not None else _settings_store().read()
     provider_name = env_values.get("LANGCHAIN_PROVIDER", "openai").strip().lower()
     provider = LLM_PROVIDER_BY_NAME.get(provider_name, LLM_PROVIDER_BY_NAME["openai"])
     api_key = env_values.get(provider.api_key_env or "", "") if provider.api_key_env else ""
@@ -483,25 +269,6 @@ def _build_llm_settings_response(
     )
 
 
-def activate_custom_provider(profile: dict[str, Any], *, store: Any) -> dict[str, Any]:
-    """Activate tested vault metadata through the canonical settings writer.
-
-    Secrets remain in the vault. The runtime resolves model, URL and key from
-    one active profile, so it never pairs another provider's ambient key with
-    the selected endpoint. The caller holds the shared store mutation lock.
-    """
-    updates = {"LANGCHAIN_PROVIDER": "custom", "LANGCHAIN_MODEL_NAME": profile["model"]}
-    previous = store._read()
-    store.activate(profile["id"])
-    try:
-        _persist_settings_updates(updates)
-    except Exception:
-        store._write(previous)
-        raise
-    for key, value in updates.items():
-        os.environ[key] = str(value)
-    reset_env_config()
-    return {"status": "ok", "active_id": profile["id"], "model": profile["model"], "base_url": profile["base_url"]}
 
 
 def _build_source_orders(env_values: Dict[str, str]) -> List[SourceOrderEntry]:
@@ -573,7 +340,7 @@ def _build_data_source_settings_response(
 ) -> DataSourceSettingsResponse:
     """Build the public data source settings payload."""
     host = _host()
-    env_values = values if values is not None else _read_settings_env_values()
+    env_values = values if values is not None else _settings_store().read()
     token = env_values.get("TUSHARE_TOKEN", "")
     token_configured = host._is_configured_secret(token, TUSHARE_TOKEN_PLACEHOLDERS)
     gildata = env_values.get("GILDATA_TOKEN", "")
@@ -594,6 +361,7 @@ def _build_data_source_settings_response(
         tushare_token_hint=None,
         gildata_token_configured=gildata_configured,
         gildata_token_hint=None,
+        gildata_features=selected_features(),
         baostock_supported=supported,
         baostock_installed=installed,
         baostock_message=baostock_message,
@@ -602,80 +370,13 @@ def _build_data_source_settings_response(
     )
 
 
-def _sync_runtime_env(provider: LLMProviderOption, updates: Dict[str, str]) -> None:
-    """Apply saved LLM settings to the running API process."""
-    host = _host()
-    for key, value in updates.items():
-        if value:
-            os.environ[key] = value
-        else:
-            os.environ.pop(key, None)
-
-    if provider.auth_type == "credential_vault":
-        reset_env_config()
-        return
-    if provider.auth_type in {"gh_cli", "claude_cli"}:
-        # The Copilot SDK / Claude Code CLI own credential discovery and transport.
-        os.environ.pop("OPENAI_API_KEY", None)
-        os.environ.pop("OPENAI_API_BASE", None)
-        os.environ.pop("OPENAI_BASE_URL", None)
-        reset_env_config()
-        return
-    elif provider.api_key_env:
-        key_value = os.environ.get(provider.api_key_env, "")  # noqa: env-gate — dynamic provider api_key_env
-        if host._is_configured_secret(key_value, LLM_API_KEY_PLACEHOLDERS):
-            os.environ["OPENAI_API_KEY"] = key_value
-        else:
-            os.environ.pop("OPENAI_API_KEY", None)
-    elif provider.auth_type == "oauth":
-        os.environ.pop("OPENAI_API_KEY", None)
-    else:
-        os.environ["OPENAI_API_KEY"] = "ollama"
-
-    base_url = os.environ.get(provider.base_url_env, "")  # noqa: env-gate — dynamic provider base_url_env
-    if base_url:
-        os.environ["OPENAI_API_BASE"] = base_url
-        os.environ["OPENAI_BASE_URL"] = base_url
-    else:
-        os.environ.pop("OPENAI_API_BASE", None)
-        os.environ.pop("OPENAI_BASE_URL", None)
-
-    reset_env_config()
-
-
-def _persist_settings_updates(updates: Dict[str, str]) -> Dict[str, str]:
-    """Persist settings to the canonical user config with legacy migration.
-
-    Args:
-        updates: Environment keys to upsert.
-
-    Returns:
-        Effective values read back from the canonical dotenv.
-
-    Raises:
-        HTTPException: If the user config cannot be written.
-    """
-    host = _host()
-    target = host.ENV_PATH
-    legacy = getattr(host, "LEGACY_ENV_PATH", _AGENT_DIR / ".env")
-    merged = dict(updates)
-    if not target.exists() and legacy != target and legacy.exists():
-        merged = {**host._read_env_values(legacy), **updates}
-    if _desktop_secure_credentials_enabled():
-        # Empty known secret keys in dotenv while preserving the decrypted
-        # environment values injected by Electron for this process.
-        merged.update({name: "" for name in _desktop_secure_credential_names()})
+def _persist_settings_updates(updates: Dict[str, str], *, apply: bool = False) -> Dict[str, str]:
     try:
-        host._write_env_values(target, merged)
+        return _settings_store().persist(updates, apply=apply)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except OSError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=(
-                "Unable to save settings; check ownership and permissions for "
-                "~/.vibe-trading/.env"
-            ),
-        ) from exc
-    return _read_settings_env_values()
+        raise HTTPException(status_code=503, detail="Unable to save settings; check ownership and permissions for ~/.vibe-trading/.env") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -765,7 +466,7 @@ def register_settings_routes(
                 ),
             )
 
-        current_values = _read_settings_env_values()
+        current_values = _settings_store().read()
         base_url = (
             payload.base_url if payload.base_url is not None else provider.default_base_url
         ).strip()
@@ -804,11 +505,8 @@ def register_settings_routes(
                 LLM_API_KEY_PLACEHOLDERS,
             ):
                 updates[provider.api_key_env] = current_values[provider.api_key_env]
-        elif payload.clear_api_key:
-            os.environ.pop("OPENAI_API_KEY", None)
 
-        saved_values = _persist_settings_updates(updates)
-        _sync_runtime_env(provider, updates)
+        saved_values = _persist_settings_updates(updates, apply=True)
         return await asyncio.to_thread(_build_llm_settings_response, saved_values)
 
     @app.post(
@@ -827,8 +525,12 @@ def register_settings_routes(
         if provider.auth_type == "claude_cli":
             # No HTTP endpoint: the base URL checks below would reject it outright.
             return await _list_claude_cli_models(provider, refresh=payload.refresh)
+        if provider.name == "openai-codex":
+            # OAuth credentials only go to our fixed Codex catalog endpoint.
+            # Do not use base_url or api_key values supplied by the settings form.
+            return await _list_openai_codex_models(provider)
 
-        current_values = _read_settings_env_values()
+        current_values = _settings_store().read()
         requested_base_url = (payload.base_url or "").strip()
         saved_base_url = (
             current_values.get(provider.base_url_env) or provider.default_base_url
@@ -877,7 +579,7 @@ def register_settings_routes(
     async def update_data_source_settings(payload: UpdateDataSourceSettingsRequest):
         """Persist project-local data source credentials and update the running process."""
         host_ref = _host()
-        current_values = _read_settings_env_values()
+        current_values = _settings_store().read()
         updates: Dict[str, str] = {}
 
         if payload.clear_tushare_token:
@@ -907,18 +609,23 @@ def register_settings_routes(
                 if value != current_values.get(env_var, ""):
                     updates[env_var] = value
 
+        if payload.gildata_features is not None:
+            updates[FEATURES_ENV] = ",".join(dict.fromkeys(payload.gildata_features))
+
         if updates:
             saved_values = _persist_settings_updates(updates)
-            token = updates.get("TUSHARE_TOKEN", "").strip()
-            if host_ref._is_configured_secret(token, TUSHARE_TOKEN_PLACEHOLDERS):
-                os.environ["TUSHARE_TOKEN"] = token
-            else:
-                os.environ.pop("TUSHARE_TOKEN", None)
-            gildata_token = updates.get("GILDATA_TOKEN", "").strip()
-            if host_ref._is_configured_secret(gildata_token, GILDATA_TOKEN_PLACEHOLDERS):
-                os.environ["GILDATA_TOKEN"] = gildata_token
-            else:
-                os.environ.pop("GILDATA_TOKEN", None)
+            for key, placeholders in (
+                ("TUSHARE_TOKEN", TUSHARE_TOKEN_PLACEHOLDERS),
+                ("GILDATA_TOKEN", GILDATA_TOKEN_PLACEHOLDERS),
+            ):
+                if key in updates:
+                    token = updates[key].strip()
+                    if host_ref._is_configured_secret(token, placeholders):
+                        os.environ[key] = token
+                    else:
+                        os.environ.pop(key, None)
+            if FEATURES_ENV in updates:
+                os.environ[FEATURES_ENV] = updates[FEATURES_ENV]
             # Hot-apply source-order overrides in this process.
             for env_var, value in order_updates.items():
                 if value:
@@ -932,5 +639,5 @@ def register_settings_routes(
             reset_env_config()
 
         return _build_data_source_settings_response(
-            saved_values if updates else _read_settings_env_values()
+            saved_values if updates else _settings_store().read()
         )

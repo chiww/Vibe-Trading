@@ -424,7 +424,7 @@ def _terminal_width() -> int:
 def _ensure_cli_env() -> None:
     """Load dotenv values before a CLI path reads configuration."""
     try:
-        from src.providers.llm import _ensure_dotenv
+        from src.providers.settings import _ensure_dotenv
 
         _ensure_dotenv()
     except Exception:
@@ -1245,6 +1245,16 @@ def _run_agent(
         else:
             console.print(f"[yellow]WARNING:[/yellow] {msg}")
 
+    # One owner for the whole CLI run: background results stay with the
+    # conversation that started them, and a bare run gets a private owner
+    # instead of a view shared with every other run in the process.
+    from src.tools.background_tools import BackgroundScope, get_background_manager
+
+    background_scope = BackgroundScope(
+        owner_id=f"session:{session_id}" if session_id else f"cli:{uuid.uuid4().hex}"
+    )
+    background = get_background_manager().for_scope(background_scope)
+
     agent = AgentLoop(
         registry=build_registry(
             persistent_memory=pm,
@@ -1252,11 +1262,14 @@ def _run_agent(
             agent_config=agent_config,
             session_id=session_id or None,
             warn_callback=_mcp_warn,
+            background_manager=background,
+            background_scope=background_scope,
         ),
         llm=ChatLLM(),
         event_callback=on_event,
         max_iterations=max_iter,
         persistent_memory=pm,
+        background_manager=background,
     )
     if run_dir_override:
         agent.memory.run_dir = run_dir_override
@@ -1902,6 +1915,9 @@ def _show_settings() -> None:
     runtime_table = Table.grid(expand=True)
     runtime_table.add_column(width=13, style="dim")
     runtime_table.add_column(ratio=1)
+    from src.config.gildata_features import selected_features
+
+    runtime_table.add_row("Gildata opt-ins", ", ".join(selected_features()) or "(none)")
     runtime_table.add_row("Temperature", str(_cfg.llm.langchain_temperature))
     runtime_table.add_row("Timeout", str(_cfg.llm.timeout_seconds) + "s")
     runtime_table.add_row("Retries", str(_cfg.llm.max_retries))
@@ -2096,10 +2112,11 @@ def cmd_interactive(max_iter: int) -> None:
         except KeyboardInterrupt:
             console.print("\n[yellow]Interrupted[/yellow]")
             continue
+        finally:
+            history.append({"role": "user", "content": user_input})
         stats.last_elapsed = time.perf_counter() - start
         stats.tool_count += dashboard.iterations
         _print_result(result, stats.last_elapsed)
-        history.append({"role": "user", "content": user_input})
         if result.get("content"):
             history.append({"role": "assistant", "content": result["content"]})
 
@@ -2361,8 +2378,9 @@ def _watch_swarm_run(store, runtime, run, dashboard: _SwarmDashboard) -> Optiona
         token_str = f"\nTokens: ~{tokens_in + tokens_out:,} (in: {tokens_in:,} out: {tokens_out:,})"
 
     if current.final_report:
-        console.print("\n[bold]\u2500\u2500 Final Report \u2500\u2500[/bold]")
-        console.print(current.final_report[:2000])
+        label = "Partial results" if current.report_is_partial else "Final Report"
+        console.print(f"\n[bold]── {label} ──[/bold]")
+        console.print(current.final_report, markup=False)
 
     console.print(f"\n[{status_color}]{current.status.value.upper()}[/{status_color}]  Time: {mins}m {secs}s{token_str}")
 
@@ -2918,7 +2936,7 @@ def cmd_session_chat(session_id: str, max_iter: int) -> None:
         console.print(f"[red]Session {session_id} not found[/red]")
         return
 
-    messages = store.get_messages(session_id)
+    messages = store.get_messages(session_id, limit=None)
     history: List[Dict[str, str]] = []
     for msg in messages:
         if msg.role in ("user", "assistant") and msg.content.strip():
@@ -2968,12 +2986,12 @@ def cmd_session_chat(session_id: str, max_iter: int) -> None:
                 console.print("\n[yellow]Interrupted[/yellow]")
                 continue
             finally:
+                history.append({"role": "user", "content": prompt})
                 _stop_timer.set()
                 _timer.join(timeout=1)
 
         stats.last_elapsed = time.perf_counter() - run_start
         _print_result(result, stats.last_elapsed)
-        history.append({"role": "user", "content": prompt})
         if result.get("content"):
             history.append({"role": "assistant", "content": result["content"]})
 
@@ -3338,113 +3356,16 @@ def _dispatch_channels(args: argparse.Namespace) -> int:
         return cmd_channels_login(args.channel_name, force=args.force)
     console.print("[red]channels requires a subcommand.[/red] Try: vibe-trading channels status")
     return EXIT_USAGE_ERROR
-# QVERIS-INTEGRATION
-def _print_qveris_config(config) -> None:  # QVERIS-INTEGRATION
-    """Render local QVeris config."""  # QVERIS-INTEGRATION
-    from src.tools.qveris_tool import SIGNUP_URL, INVITE_CODE, has_qveris_credentials, is_qveris_configured, mask_api_key, normalize_qveris_mode  # QVERIS-INTEGRATION
-    table = Table(title="Data Routing", box=box.SIMPLE)  # QVERIS-INTEGRATION
-    table.add_column("Field")  # QVERIS-INTEGRATION
-    table.add_column("Value")  # QVERIS-INTEGRATION
-    table.add_row("mode", normalize_qveris_mode(config.mode))  # QVERIS-INTEGRATION
-    table.add_row("free_route", "built-in public data")  # QVERIS-INTEGRATION
-    table.add_row("premium_provider", "QVeris")  # QVERIS-INTEGRATION
-    table.add_row("paid_active", "yes" if is_qveris_configured(config) else "no")  # QVERIS-INTEGRATION
-    table.add_row("premium_key", "yes" if has_qveris_credentials(config) else "no")  # QVERIS-INTEGRATION
-    table.add_row("base_url", config.base_url)  # QVERIS-INTEGRATION
-    table.add_row("api_key", mask_api_key(config.api_key) or "(not set)")  # QVERIS-INTEGRATION
-    table.add_row("budget/session", str(config.budget_credits_per_session))  # QVERIS-INTEGRATION
-    table.add_row("signup", SIGNUP_URL)  # QVERIS-INTEGRATION
-    table.add_row("invite_code", INVITE_CODE)  # QVERIS-INTEGRATION
-    console.print(table)  # QVERIS-INTEGRATION
-# QVERIS-INTEGRATION
-def cmd_qveris_status() -> int:  # QVERIS-INTEGRATION
-    """Show QVeris local config and live status when configured."""  # QVERIS-INTEGRATION
-    from src.tools.qveris_tool import QVerisClient, is_qveris_configured, load_qveris_config  # QVERIS-INTEGRATION
-    config = load_qveris_config()  # QVERIS-INTEGRATION
-    _print_qveris_config(config)  # QVERIS-INTEGRATION
-    if not is_qveris_configured(config):  # QVERIS-INTEGRATION
-        return EXIT_SUCCESS  # QVERIS-INTEGRATION
-    try:  # QVERIS-INTEGRATION
-        payload = QVerisClient(config).search("status", limit=1)  # QVERIS-INTEGRATION
-        console.print(f"[green]QVeris reachable.[/green] remaining_credits={payload.get('remaining_credits')}")  # QVERIS-INTEGRATION
-        return EXIT_SUCCESS  # QVERIS-INTEGRATION
-    except Exception as exc:  # noqa: BLE001  # QVERIS-INTEGRATION
-        console.print(f"[red]QVeris status failed:[/red] {exc}")  # QVERIS-INTEGRATION
-        return EXIT_RUN_FAILED  # QVERIS-INTEGRATION
-# QVERIS-INTEGRATION
-def cmd_qveris_enable(*, key: str | None = None, url: str | None = None) -> int:  # QVERIS-INTEGRATION
-    """Enable QVeris if an API key is present or supplied."""  # QVERIS-INTEGRATION
-    from src.tools.qveris_tool import SIGNUP_URL, INVITE_CODE, QVerisConfig, _read_config_file, save_qveris_config  # QVERIS-INTEGRATION
-    existing = _read_config_file()  # QVERIS-INTEGRATION
-    api_key = (key or existing.api_key or "").strip()  # QVERIS-INTEGRATION
-    if not api_key:  # QVERIS-INTEGRATION
-        console.print("[yellow]QVeris API key is required to enable the integration.[/yellow]")  # QVERIS-INTEGRATION
-        console.print(f"[dim]Sign up: {SIGNUP_URL}  invite_code={INVITE_CODE}[/dim]")  # QVERIS-INTEGRATION
-        return EXIT_USAGE_ERROR  # QVERIS-INTEGRATION
-    base_url = (url or existing.base_url).strip().rstrip("/")  # QVERIS-INTEGRATION
-    if not base_url.startswith(("http://", "https://")):  # QVERIS-INTEGRATION
-        console.print("[red]--url must start with http:// or https://[/red]")  # QVERIS-INTEGRATION
-        return EXIT_USAGE_ERROR  # QVERIS-INTEGRATION
-    saved = save_qveris_config(QVerisConfig(True, base_url, api_key, "paid", existing.budget_credits_per_session))  # QVERIS-INTEGRATION
-    console.print("[green]QVeris paid route enabled.[/green]")  # QVERIS-INTEGRATION
-    _print_qveris_config(saved)  # QVERIS-INTEGRATION
-    return EXIT_SUCCESS  # QVERIS-INTEGRATION
-# QVERIS-INTEGRATION
-def cmd_qveris_mode(
-    *,
-    mode: str,
-    budget: float | None = None,
-    key: str | None = None,
-    url: str | None = None,
-) -> int:  # QVERIS-INTEGRATION
-    """Switch QVeris between free and paid modes."""  # QVERIS-INTEGRATION
-    from src.tools.qveris_tool import QVerisConfig, _read_config_file, normalize_qveris_mode, save_qveris_config  # QVERIS-INTEGRATION
-    existing = _read_config_file()  # QVERIS-INTEGRATION
-    next_mode = normalize_qveris_mode(mode)  # QVERIS-INTEGRATION
-    next_budget = existing.budget_credits_per_session if budget is None else max(float(budget), 0.0)  # QVERIS-INTEGRATION
-    base_url = (url or existing.base_url).strip().rstrip("/")  # QVERIS-INTEGRATION
-    if not base_url.startswith(("http://", "https://")):  # QVERIS-INTEGRATION
-        console.print("[red]--url must start with http:// or https://[/red]")  # QVERIS-INTEGRATION
-        return EXIT_USAGE_ERROR  # QVERIS-INTEGRATION
-    api_key = (key or existing.api_key or "").strip()  # QVERIS-INTEGRATION
-    saved = save_qveris_config(QVerisConfig(next_mode == "paid", base_url, api_key, next_mode, next_budget))  # QVERIS-INTEGRATION
-    console.print(f"[green]QVeris mode set to {next_mode}.[/green]")  # QVERIS-INTEGRATION
-    _print_qveris_config(saved)  # QVERIS-INTEGRATION
-    return EXIT_SUCCESS  # QVERIS-INTEGRATION
-# QVERIS-INTEGRATION
-def cmd_qveris_disable() -> int:  # QVERIS-INTEGRATION
-    """Disable QVeris without deleting the stored key."""  # QVERIS-INTEGRATION
-    from src.tools.qveris_tool import QVerisConfig, _read_config_file, save_qveris_config  # QVERIS-INTEGRATION
-    existing = _read_config_file()  # QVERIS-INTEGRATION
-    save_qveris_config(QVerisConfig(False, existing.base_url, existing.api_key, "free", existing.budget_credits_per_session))  # QVERIS-INTEGRATION
-    console.print("[green]QVeris disabled.[/green]")  # QVERIS-INTEGRATION
-    return EXIT_SUCCESS  # QVERIS-INTEGRATION
-# QVERIS-INTEGRATION
-def cmd_qveris_usage() -> int:  # QVERIS-INTEGRATION
-    """Show recent QVeris usage events."""  # QVERIS-INTEGRATION
-    from src.tools.qveris_tool import QVerisClient, is_qveris_configured, load_qveris_config  # QVERIS-INTEGRATION
-    config = load_qveris_config()  # QVERIS-INTEGRATION
-    if not is_qveris_configured(config):  # QVERIS-INTEGRATION
-        console.print("[yellow]QVeris is not configured.[/yellow]")  # QVERIS-INTEGRATION
-        return EXIT_USAGE_ERROR  # QVERIS-INTEGRATION
-    try:  # QVERIS-INTEGRATION
-        payload = QVerisClient(config).usage_history(limit=10, page_size=10)  # QVERIS-INTEGRATION
-    except Exception as exc:  # noqa: BLE001  # QVERIS-INTEGRATION
-        console.print(f"[red]QVeris usage failed:[/red] {exc}")  # QVERIS-INTEGRATION
-        return EXIT_RUN_FAILED  # QVERIS-INTEGRATION
-    print(json.dumps(payload, indent=2, ensure_ascii=False))  # QVERIS-INTEGRATION
-    return EXIT_SUCCESS  # QVERIS-INTEGRATION
-def _dispatch_data(args: argparse.Namespace) -> int:  # QVERIS-INTEGRATION
-    """Dispatch user-facing data-routing commands."""  # QVERIS-INTEGRATION
-    if args.data_command == "status":  # QVERIS-INTEGRATION
-        return cmd_qveris_status()  # QVERIS-INTEGRATION
-    if args.data_command == "mode":  # QVERIS-INTEGRATION
-        return cmd_qveris_mode(mode=args.mode, budget=args.budget, key=args.key, url=args.url)  # QVERIS-INTEGRATION
-    if args.data_command == "usage":  # QVERIS-INTEGRATION
-        return cmd_qveris_usage()  # QVERIS-INTEGRATION
-    console.print("[red]data requires a subcommand.[/red] Try: vibe-trading data status")  # QVERIS-INTEGRATION
-    return EXIT_USAGE_ERROR  # QVERIS-INTEGRATION
-# QVERIS-INTEGRATION
+def _dispatch_data(args: argparse.Namespace) -> int:
+    """Show the optional data partner and the features selected for this process."""
+    from src.config.gildata_features import selected_features
+
+    _ensure_cli_env()
+    console.print("Gildata: " + (", ".join(selected_features()) or "no optional research features selected"))
+    console.print("Gildata: https://www.gildata.com/products/datamap")
+    return EXIT_SUCCESS
+
+
 def _live_server_config(broker: str):
     """Resolve the protected MCP server config for ``broker``.
 
@@ -5592,25 +5513,21 @@ def _build_parser() -> argparse.ArgumentParser:
     office_parser = subparsers.add_parser("office", help="Manage the shared research task board")
     office_parser.add_argument("office_args", nargs=argparse.REMAINDER)
 
-    provider_parser = subparsers.add_parser("provider", help="Manage OAuth providers")
+    provider_parser = subparsers.add_parser("provider", help="Manage LLM providers")
     provider_subparsers = provider_parser.add_subparsers(dest="provider_command")
     login_parser = provider_subparsers.add_parser("login", help="Authenticate with an OAuth provider")
     login_parser.add_argument("provider", help="OAuth provider name, e.g. openai-codex")
     provider_subparsers.add_parser("doctor", help="Print redacted provider diagnostics")
+    provider_subparsers.add_parser("list", help="List the shared provider catalog as JSON")
     from cli.custom_providers import configure_parser as configure_custom_providers
     configure_custom_providers(provider_subparsers.add_parser("custom", help="Manage tested custom model endpoints"))
 
-    # QVERIS-INTEGRATION
-    data_parser = subparsers.add_parser("data", help="Manage data routing mode")  # QVERIS-INTEGRATION
-    data_subparsers = data_parser.add_subparsers(dest="data_command")  # QVERIS-INTEGRATION
-    data_subparsers.add_parser("status", help="Show active data routing mode")  # QVERIS-INTEGRATION
-    data_mode = data_subparsers.add_parser("mode", help="Switch between free public data and paid data routing")  # QVERIS-INTEGRATION
-    data_mode.add_argument("mode", choices=["free", "paid"], help="free uses built-in public data; paid enables premium data execution")  # QVERIS-INTEGRATION
-    data_mode.add_argument("--budget", type=float, help="Paid-mode credit budget per session")  # QVERIS-INTEGRATION
-    data_mode.add_argument("--key", help="Premium data API key")  # QVERIS-INTEGRATION
-    data_mode.add_argument("--url", help="Premium data API base URL")  # QVERIS-INTEGRATION
-    data_subparsers.add_parser("usage", help="Show recent paid data usage")  # QVERIS-INTEGRATION
-    # QVERIS-INTEGRATION
+    data_parser = subparsers.add_parser("data", help="Show research data partner settings")
+    data_subparsers = data_parser.add_subparsers(dest="data_command", required=True)
+    data_subparsers.add_parser("status", help="Show selected Gildata features")
+    from src.data_gateway.__main__ import add_history_parser, add_scan_parser
+    add_history_parser(data_subparsers)
+    add_scan_parser(data_subparsers)
     channels_parser = subparsers.add_parser("channels", help="Manage IM channel adapters")
     channels_subparsers = channels_parser.add_subparsers(dest="channels_command")
     channels_status = channels_subparsers.add_parser("status", help="Show IM channel status")
@@ -5877,6 +5794,13 @@ def _build_parser() -> argparse.ArgumentParser:
     from src.hypotheses.cli_handlers import add_subparser as _add_hypothesis_subparser
     _add_hypothesis_subparser(subparsers)
 
+    # Versioned research-artifact index
+    from src.research_artifacts.cli_handlers import add_subparser as _add_research_artifact_subparser
+    _add_research_artifact_subparser(subparsers)
+
+    from src.research_lab.cli import add_subparser as _add_research_lab_subparser
+    _add_research_lab_subparser(subparsers)
+
     # Scheduled-research playbook templates (list / show / create)
     from cli.commands.research_playbook import add_subparser as _add_playbook_subparser
     _add_playbook_subparser(subparsers)
@@ -5918,208 +5842,9 @@ def _handle_prompt_command(
 
 _INIT_ENV_PATH = Path.home() / ".vibe-trading" / ".env"
 
-_PROVIDER_CHOICES: list[dict[str, str | None]] = [
-    {
-        "label": "OpenRouter (recommended - multiple models)",
-        "provider": "openrouter",
-        "key_env": "OPENROUTER_API_KEY",
-        "base_env": "OPENROUTER_BASE_URL",
-        "base_url": "https://openrouter.ai/api/v1",
-        "model": "deepseek/deepseek-v4-pro",
-        "key_prefix": "sk-or-",
-        "key_placeholder": "sk-or-v1-...",
-    },
-    {
-        "label": "DeepSeek",
-        "provider": "deepseek",
-        "key_env": "DEEPSEEK_API_KEY",
-        "base_env": "DEEPSEEK_BASE_URL",
-        "base_url": "https://api.deepseek.com/v1",
-        "model": "deepseek-v4-pro",
-        "key_prefix": "sk-",
-        "key_placeholder": "sk-...",
-    },
-    {
-        "label": "OpenCode (Go / Zen)",
-        "provider": "opencode",
-        "key_env": "OPENCODE_API_KEY",
-        "base_env": "OPENCODE_BASE_URL",
-        "base_url": "https://opencode.ai/zen/go/v1",
-        "model": "deepseek-v4.1-flash",
-        "key_prefix": "sk-",
-        "key_placeholder": "sk-...",
-    },
-    {
-        "label": "SiliconFlow (CN)",
-        "provider": "siliconflow-cn",
-        "key_env": "SILICONFLOW_API_KEY",
-        "base_env": "SILICONFLOW_BASE_URL",
-        "base_url": "https://api.siliconflow.cn/v1",
-        "model": "deepseek-ai/DeepSeek-V3.1-Terminus",
-        "key_prefix": "sk-",
-        "key_placeholder": "sk-...",
-    },
-    {
-        "label": "SiliconFlow (Global)",
-        "provider": "siliconflow-global",
-        "key_env": "SILICONFLOW_GLOBAL_API_KEY",
-        "base_env": "SILICONFLOW_GLOBAL_BASE_URL",
-        "base_url": "https://api.siliconflow.com/v1",
-        "model": "deepseek-ai/DeepSeek-V3.1-Terminus",
-        "key_prefix": "sk-",
-        "key_placeholder": "sk-...",
-    },
-    {
-        "label": "ModelScope",
-        "provider": "modelscope",
-        "key_env": "MODELSCOPE_API_KEY",
-        "base_env": "MODELSCOPE_BASE_URL",
-        "base_url": "https://api-inference.modelscope.cn/v1",
-        "model": "Qwen/Qwen3.5-27B",
-        "key_prefix": None,
-        "key_placeholder": "api-key...",
-    },
-    {
-        "label": "NVIDIA NIM",
-        "provider": "nvidia",
-        "key_env": "NVIDIA_API_KEY",
-        "base_env": "NVIDIA_BASE_URL",
-        "base_url": "https://integrate.api.nvidia.com/v1",
-        "model": "nvidia/nemotron-3-ultra-550b-a55b",
-        "key_prefix": "nvapi-",
-        "key_placeholder": "nvapi-...",
-    },
-    {
-        "label": "OpenAI",
-        "provider": "openai",
-        "key_env": "OPENAI_API_KEY",
-        "base_env": "OPENAI_BASE_URL",
-        "base_url": "https://api.openai.com/v1",
-        "model": "gpt-5.5",
-        "key_prefix": "sk-",
-        "key_placeholder": "sk-...",
-    },
-    {
-        "label": "Gemini",
-        "provider": "gemini",
-        "key_env": "GEMINI_API_KEY",
-        "base_env": "GEMINI_BASE_URL",
-        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
-        "model": "gemini-3.5-flash",
-        "key_prefix": None,
-        "key_placeholder": "api-key...",
-    },
-    {
-        "label": "Groq",
-        "provider": "groq",
-        "key_env": "GROQ_API_KEY",
-        "base_env": "GROQ_BASE_URL",
-        "base_url": "https://api.groq.com/openai/v1",
-        "model": "meta-llama/llama-4-maverick-17b-128e-instruct",
-        "key_prefix": "gsk_",
-        "key_placeholder": "gsk_...",
-    },
-    {
-        "label": "DashScope / Qwen",
-        "provider": "dashscope",
-        "key_env": "DASHSCOPE_API_KEY",
-        "base_env": "DASHSCOPE_BASE_URL",
-        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "model": "qwen-plus-latest",
-        "key_prefix": "sk-",
-        "key_placeholder": "sk-...",
-    },
-    {
-        "label": "Zhipu",
-        "provider": "zhipu",
-        "key_env": "ZHIPU_API_KEY",
-        "base_env": "ZHIPU_BASE_URL",
-        "base_url": "https://open.bigmodel.cn/api/paas/v4",
-        "model": "glm-5.1",
-        "key_prefix": None,
-        "key_placeholder": "api-key...",
-    },
-    {
-        "label": "Moonshot / Kimi",
-        "provider": "moonshot",
-        "key_env": "MOONSHOT_API_KEY",
-        "base_env": "MOONSHOT_BASE_URL",
-        "base_url": "https://api.moonshot.ai/v1",
-        "model": "kimi-k2.6",
-        "key_prefix": "sk-",
-        "key_placeholder": "sk-...",
-    },
-    {
-        "label": "MiniMax",
-        "provider": "minimax",
-        "key_env": "MINIMAX_API_KEY",
-        "base_env": "MINIMAX_BASE_URL",
-        "base_url": "https://api.minimax.io/v1",
-        "model": "MiniMax-M3.1-Flash",
-        "key_prefix": None,
-        "key_placeholder": "api-key...",
-    },
-    {
-        "label": "Xiaomi MIMO",
-        "provider": "mimo",
-        "key_env": "MIMO_API_KEY",
-        "base_env": "MIMO_BASE_URL",
-        "base_url": "https://api.xiaomimimo.com/v1",
-        "model": "MiMo-72B-A27B",
-        "key_prefix": None,
-        "key_placeholder": "api-key...",
-    },
-    {
-        "label": "Novita AI",
-        "provider": "novita",
-        "key_env": "NOVITA_API_KEY",
-        "base_env": "NOVITA_BASE_URL",
-        "base_url": "https://api.novita.ai/openai",
-        "model": "moonshotai/kimi-k3",
-        "key_prefix": "sk_",
-        "key_placeholder": "sk_...",
-    },
-    {
-        "label": "iFlytek Spark",
-        "provider": "spark",
-        "key_env": "SPARK_API_KEY",
-        "base_env": "SPARK_BASE_URL",
-        "base_url": "https://spark-api-open.xf-yun.com/v1",
-        "model": "4.0Ultra",
-        "key_prefix": None,
-        "key_placeholder": "api-password...",
-    },
-    {
-        "label": "Z.ai (Coding platform)",
-        "provider": "zai",
-        "key_env": "ZAI_API_KEY",
-        "base_env": "ZAI_BASE_URL",
-        "base_url": "https://api.z.ai/api/coding/paas/v4",
-        "model": "glm-5.1",
-        "key_prefix": None,
-        "key_placeholder": "api-key...",
-    },
-    {
-        "label": "Ollama (local, free)",
-        "provider": "ollama",
-        "key_env": None,
-        "base_env": "OLLAMA_BASE_URL",
-        "base_url": "http://localhost:11434",
-        "model": "qwen2.5:32b",
-        "key_prefix": None,
-        "key_placeholder": None,
-    },
-    {
-        "label": "OpenAI Codex (ChatGPT OAuth)",
-        "provider": "openai-codex",
-        "key_env": None,
-        "base_env": "OPENAI_CODEX_BASE_URL",
-        "base_url": "https://chatgpt.com/backend-api/codex/responses",
-        "model": "openai-codex/gpt-6-sol",
-        "key_prefix": None,
-        "key_placeholder": None,
-    },
-]
+from src.providers.registry import setup_choices
+
+_PROVIDER_CHOICES = setup_choices()
 
 
 def _validate_api_key(api_key: str, expected_prefix: str | None) -> bool:
@@ -6129,52 +5854,7 @@ def _validate_api_key(api_key: str, expected_prefix: str | None) -> bool:
     return api_key.startswith(expected_prefix)
 
 
-def _render_env_content(config: dict[str, str]) -> str:
-    """Render .env content with stable ordering."""
-    ordered_keys = [
-        "LANGCHAIN_TEMPERATURE",
-        "LANGCHAIN_PROVIDER",
-        "OPENROUTER_API_KEY",
-        "OPENROUTER_BASE_URL",
-        "DEEPSEEK_API_KEY",
-        "DEEPSEEK_BASE_URL",
-        "NVIDIA_API_KEY",
-        "NVIDIA_BASE_URL",
-        "OPENAI_API_KEY",
-        "OPENAI_BASE_URL",
-        "OPENAI_CODEX_BASE_URL",
-        "GEMINI_API_KEY",
-        "GEMINI_BASE_URL",
-        "GROQ_API_KEY",
-        "GROQ_BASE_URL",
-        "NOVITA_API_KEY",
-        "NOVITA_BASE_URL",
-        "DASHSCOPE_API_KEY",
-        "DASHSCOPE_BASE_URL",
-        "ZHIPU_API_KEY",
-        "ZHIPU_BASE_URL",
-        "MOONSHOT_API_KEY",
-        "MOONSHOT_BASE_URL",
-        "MINIMAX_API_KEY",
-        "MINIMAX_BASE_URL",
-        "MIMO_API_KEY",
-        "MIMO_BASE_URL",
-        "SPARK_API_KEY",
-        "SPARK_BASE_URL",
-        "ZAI_API_KEY",
-        "ZAI_BASE_URL",
-        "OLLAMA_BASE_URL",
-        "LANGCHAIN_MODEL_NAME",
-        "TUSHARE_TOKEN",
-        "TIMEOUT_SECONDS",
-        "MAX_RETRIES",
-    ]
-    lines: list[str] = []
-    for key in ordered_keys:
-        value = config.get(key)
-        if value:
-            lines.append(f"{key}={value}")
-    return "\n".join(lines) + "\n"
+from src.config.dotenv import render_env as _render_env_content  # noqa: F401 — legacy cli export
 
 
 from src.memory.persistent import MEMORY_TYPES  # noqa: E402  source-of-truth for choices/invariants
@@ -6398,12 +6078,9 @@ def cmd_init() -> int:
     if tushare_token:
         env_values["TUSHARE_TOKEN"] = tushare_token
 
-    _INIT_ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _INIT_ENV_PATH.write_text(_render_env_content(env_values), encoding="utf-8")
-    try:
-        _INIT_ENV_PATH.chmod(0o600)
-    except OSError:
-        pass
+    from src.providers.settings import SettingsStore
+
+    SettingsStore(path=_INIT_ENV_PATH).persist(env_values, replace=True)
 
     next_steps = Table.grid(expand=True)
     next_steps.add_column(width=10, style="dim")
@@ -6758,6 +6435,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "provider":
         if args.provider_command == "login":
             return cmd_provider_login(args.provider)
+        if args.provider_command == "list":
+            from src.providers.registry import provider_catalog as catalog
+
+            console.print_json(data=catalog())
+            return EXIT_SUCCESS
         if args.provider_command == "doctor":
             return cmd_provider_doctor()
         if args.provider_command == "custom":
@@ -6767,8 +6449,18 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_USAGE_ERROR
     if args.command == "channels":
         return _coerce_exit_code(_dispatch_channels(args))
-    if args.command == "data":  # QVERIS-INTEGRATION
-        return _coerce_exit_code(_dispatch_data(args))  # QVERIS-INTEGRATION
+    if args.command == "data":
+        if args.data_command == "scan":
+            from src.data_gateway.__main__ import run_scan
+            return run_scan(args)
+        if args.data_command == "history":
+            from src.data_gateway.__main__ import run_history
+            try:
+                run_history(args)
+                return 0
+            except SystemExit as exc:
+                return int(exc.code) if isinstance(exc.code, int) else EXIT_USAGE_ERROR
+        return _coerce_exit_code(_dispatch_data(args))
     if args.command == "run":
         return _handle_prompt_command(
             args.run_prompt,
@@ -6793,6 +6485,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "hypothesis":
         from src.hypotheses.cli_handlers import dispatch as _hyp_dispatch
         return _coerce_exit_code(_hyp_dispatch(args))
+    if args.command == "research-artifact":
+        from src.research_artifacts.cli_handlers import dispatch as _research_artifact_dispatch
+        return _coerce_exit_code(_research_artifact_dispatch(args))
+    if args.command == "research-lab":
+        from src.research_lab.cli import dispatch as _research_lab_dispatch
+        return _coerce_exit_code(_research_lab_dispatch(args))
     if args.command == "playbook":
         from cli.commands.research_playbook import dispatch as _playbook_dispatch
         return _coerce_exit_code(_playbook_dispatch(args))
