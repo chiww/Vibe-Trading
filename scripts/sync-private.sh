@@ -16,8 +16,12 @@ git checkout private/tdxtap-source
 git fetch upstream
 git merge upstream/main
 
-# 版本号读的是 importlib.metadata，安装时冻结；光 pull 会让它停在旧值
-VIRTUAL_ENV=.venv uv pip install -e . --no-deps
+# 完整安装而非 --no-deps，两个理由：
+# 1. 版本号读的是 importlib.metadata，安装时冻结；光 pull 会让它停在旧值。
+# 2. 上游会新增依赖。--no-deps 时新依赖装不上，下面的测试会因 ImportError
+#    大面积变红、看着像 merge 打坏了（2026-11-16 那次：上游新增
+#    exchange_calendars，20 个失败里 19 个是它）。依赖都已满足时这一步很快。
+VIRTUAL_ENV=.venv uv pip install -e .
 
 # 跑的是「上游 merge 最可能打破的那些」，不是「我们自己写的那个」。
 # 私有改动全部寄生在上游的结构上：文档守卫按注册源集合断言、路由与口径表
